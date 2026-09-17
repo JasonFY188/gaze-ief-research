@@ -20,58 +20,102 @@ Reference image × gaze cone mask → DeepGaze IIE saliency map
 |------|-------------|
 | `final_form.py` | Plain L2CS-Net pipeline with multiple cone configs |
 | `final_form_ief.py` | IEF per-fold + ensemble pipeline |
-| `paths.py` | **Edit this** to set paths for your machine |
+| `paths.py` | Default file locations (override per machine in `paths_local.py`) |
+| `check_env.py` | Checks libraries, GPU and file locations on a new machine |
 | `blob_projection_utils.py` | Projects 3D gaze blobs into reference views |
-| `l2cs_net/l2cs/` | L2CS-Net library with IEF extensions |
+| `l2cs_net/l2cs/` | L2CS-Net library with IEF extensions (see `l2cs_net/CLAUDE.md`) |
 | `l2cs_net/train_refinement.py` | Train IEF head on Gaze360 backbone |
 | `l2cs_net/train_ief_mpiigaze.py` | Train IEF head on MPIIGaze backbone |
+| `pyproject.toml` / `uv.lock` | Exact library versions — the environment is rebuilt from these |
 
-## Setup
+## Setup (Windows or Linux)
 
-### 1. Conda environment
+The environment is managed with [uv](https://docs.astral.sh/uv/). It creates an isolated `.venv/`
+inside this folder with its own Python 3.11, so it cannot clash with other Python installs,
+conda envs or projects on the machine. `uv.lock` pins every library (including the GitHub-only
+ones: VGGT, DeepGaze, face-detection) to the exact versions that were tested.
+
+### 1. Install uv (once per machine)
+```powershell
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
 ```bash
-conda create -n vggt python=3.10
-conda activate vggt
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-pip install -r requirements.txt   # or use environment.yml if provided
+# Linux / macOS
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-### 2. Install L2CS-Net with IEF
+### 2. Clone and install
 ```bash
-pip install -e l2cs_net/
+git clone https://github.com/JasonFY188/gaze-ief-research
+cd gaze-ief-research
+uv sync
 ```
+This installs PyTorch (CUDA 12.8 build), VGGT, DeepGaze, face-detection, and `l2cs_net/` in
+editable mode — changes you make in `l2cs_net/l2cs/` take effect immediately, no reinstall.
 
-### 3. Download model weights
-Place these in the locations set in `paths.py`:
+> **GPU driver:** the CUDA 12.8 build needs NVIDIA driver ≥ 570. It supports RTX 50xx
+> (required for these) as well as 30xx/40xx cards.
 
-| Weight | Source |
-|--------|--------|
-| `L2CSNet_gaze360.pkl` | [L2CS-Net releases](https://github.com/Ahmednull/L2CS-Net) |
-| `fold0.pkl … fold14.pkl` (MPIIGaze backbones) | Train with `l2cs_net/train.py` on MPIIGaze |
-| `checkpoints/ief_gaze360/best_fold*.pt` | Train with `l2cs_net/train_refinement.py` |
-| `checkpoints/ief_mpiigaze/best_fold*.pt` | Train with `l2cs_net/train_ief_mpiigaze.py` |
-| VGGT (`facebook/VGGT-1B`) | Auto-downloaded from HuggingFace |
-| DeepGaze IIE | Auto-downloaded from torch hub |
-| `centerbias_mit1003.npy` | [MIT1003 centerbias](https://people.csail.mit.edu/tjudd/WherePeopleLook/) |
-
-### 4. Edit paths
-```python
-# paths.py — set these for your machine
-BASE_ROOT             = "/path/to/your/dataset"
-IEF_REPO              = "/path/to/l2cs_net"
-L2CS_WEIGHTS          = "/path/to/L2CSNet_gaze360.pkl"
-GAZE360_BACKBONE      = "/path/to/L2CSNet_gaze360.pkl"
-MPIIGAZE_BACKBONE_DIR = "/path/to/MPIIGaze/"
+### 3. Check the environment
+```bash
+uv run python check_env.py
 ```
+All libraries and CUDA should show `[OK]`. Files marked `[--]` are just not in place yet (step 4).
+
+### 4. Put model weights and data in place
+By default everything lives inside the repo (these folders are git-ignored):
+
+```
+gaze-ief-research/
+├── weights/
+│   ├── L2CSNet_gaze360.pkl          # L2CS-Net releases: https://github.com/Ahmednull/L2CS-Net
+│   ├── centerbias_mit1003.npy       # DeepGaze centerbias (MIT1003)
+│   └── MPIIGaze/fold0.pkl … fold14.pkl   # train with l2cs_net/train.py on MPIIGaze
+├── l2cs_net/checkpoints/
+│   ├── ief_gaze360/best_fold*.pt    # l2cs_net/train_refinement.py
+│   └── ief_mpiigaze/best_fold*.pt   # l2cs_net/train_ief_mpiigaze.py
+├── data/experiment/                 # dataset root (structure below)
+└── outputs/                         # Excel/text summaries are written here
+```
+VGGT (`facebook/VGGT-1B`) and the DeepGaze IIE weights download automatically on first run.
+
+**Files somewhere else?** Copy `paths_local.example.py` to `paths_local.py` and set only the paths
+that differ. `paths_local.py` is git-ignored, so every machine keeps its own and `git pull` never
+overwrites it.
 
 ### 5. Run
 ```bash
-# Plain L2CS pipeline
-python final_form.py
+uv run python final_form.py        # plain L2CS pipeline
+uv run python final_form_ief.py    # IEF pipeline (per-fold + ensemble)
 
-# IEF pipeline (per-fold + ensemble)
-python final_form_ief.py
+# training / evaluation scripts work the same way, e.g.
+uv run python l2cs_net/train_refinement.py --help
 ```
+`uv run` always uses this project's `.venv`, no activation needed. If you prefer activating it
+(e.g. to select it as the interpreter in VS Code): `.venv\Scripts\activate` on Windows,
+`source .venv/bin/activate` on Linux.
+
+## Adding things later
+
+| Task | Command |
+|------|---------|
+| Add a library | `uv add <package>` (updates `pyproject.toml` + `uv.lock`; commit both) |
+| Remove a library | `uv remove <package>` |
+| Get a teammate's changes | `git pull` then `uv sync` |
+| Rebuild a broken environment | delete `.venv/` and run `uv sync` |
+| Run the l2cs tests | `uv run --group dev pytest l2cs_net/tests/test_wrapper.py` |
+
+Avoid `pip install` into `.venv` directly — uv won't record it, so other machines won't get it.
+
+## Troubleshooting
+
+- **`UnicodeEncodeError: 'cp932' codec can't encode …`** (Japanese Windows): some scripts print
+  characters like `—`. Enable Python's UTF-8 mode once, then open a new terminal:
+  `setx PYTHONUTF8 1`
+- **`CUDA not available` in `check_env.py`**: update the NVIDIA driver (≥ 570).
+- **Out of GPU memory**: VGGT (~5 GB of float32 weights, ~6 GB peak for 3 views) and DeepGaze IIE
+  are loaded together, so cards with 8 GB or less may run out of memory.
 
 ## Dataset structure expected
 ```

@@ -4,6 +4,12 @@ __pycache__/
 *.pyo
 *.egg-info/
 
+# Environment (recreate with `uv sync`)
+.venv/
+
+# Machine-specific path overrides (see paths_local.example.py)
+paths_local.py
+
 # Model weights (download separately — see README)
 *.pkl
 *.pt
@@ -13,6 +19,7 @@ __pycache__/
 *.npy
 
 # Datasets and outputs
+weights/
 datasets/
 data/
 output*/

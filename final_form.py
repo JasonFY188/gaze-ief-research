@@ -39,13 +39,16 @@ from vggt.utils.pose_enc import pose_encoding_to_extri_intri  # type: ignore
 from blob_projection_utils import project_blob_to_images  # type: ignore
 import deepgaze_pytorch  # type: ignore
 
+# Machine-specific paths come from paths.py (override them in paths_local.py).
+from paths import BASE_ROOT, L2CS_WEIGHTS, CENTERBIAS_NPY, VGGT_SOURCE
+from paths import FINAL_FORM_SUMMARY_DIR as SUMMARY_OUT_DIR
+
 warnings.filterwarnings("ignore", message=".*flash attention.*", category=UserWarning)
 
 # =============================================================================
 # CONFIG
 # =============================================================================
-# Point to the top-level experiment folder — everything else is auto-discovered.
-BASE_ROOT = r"/home/keisokulab/Downloads/Jikken_2 (3rd copy)"
+# BASE_ROOT (top-level experiment folder) is set in paths.py — everything else is auto-discovered.
 
 # Optional filters — set None to process everything found under BASE_ROOT.
 # ONLY_SCENARIO_NAME   : name of the scenario root folder  (e.g. "scenario_1_4m")
@@ -62,9 +65,6 @@ REF_IMAGE_NAMES = ["view1.jpg", "view2.jpg"]
 
 DEEPGAZE_VIEW_IDXS = [2]
 GAZE_VIEW_IDX = 0
-
-L2CS_WEIGHTS = r"/home/keisokulab/learning_workshop/L2CSNet_gaze360.pkl"
-CENTERBIAS_NPY = r"centerbias_mit1003.npy"
 
 DEEPGAZE_MAX_DIM = 1024
 
@@ -126,8 +126,7 @@ CONE_ABLATION = [
     {"name": "fixed_15",    "dynamic": False, "quantile": None,  "fixed_deg": 15.0},
 ]
 
-# Output folder for per-person per-distance Excel summaries (created automatically).
-SUMMARY_OUT_DIR = r"/home/keisokulab/Desktop/final_form"
+# Output folder for per-person per-distance Excel summaries: SUMMARY_OUT_DIR, set in paths.py.
 
 # Maps the top-level person folder name under BASE_ROOT to a readable label.
 PERSON_LABEL_MAP: Dict[str, str] = {
@@ -1582,7 +1581,7 @@ def main() -> None:
     if not os.path.isfile(CENTERBIAS_NPY):
         raise RuntimeError(
             f"centerbias file not found: {CENTERBIAS_NPY}\n"
-            f"Run from the directory that contains it, or set CENTERBIAS_NPY to an absolute path."
+            f"Place it there or set CENTERBIAS_NPY in paths_local.py."
         )
 
     # ---- Discover all data roots (folders containing view1.jpg + view2.jpg) ----
@@ -1601,7 +1600,9 @@ def main() -> None:
 
     # ---- Load models once ----
     print("\n[LOAD] VGGT (once)")
-    vggt_model = VGGT.from_pretrained("facebook/VGGT-1B").to(dtype).to(device_str)
+    # Keep VGGT weights in float32: autocast handles fp16. VGGT's heads disable autocast
+    # internally, so fp16 weights crash with "expected scalar type Float but found Half".
+    vggt_model = VGGT.from_pretrained(VGGT_SOURCE).to(device_str)
     vggt_model.eval()
 
     print("[LOAD] L2CS (once)")

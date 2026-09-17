@@ -1,0 +1,49 @@
+[project]
+name = "gaze-ief-research"
+version = "0.1.0"
+description = "L2CS-Net / IEF gaze + DeepGaze IIE saliency + VGGT 3D fusion pipeline"
+readme = "README.md"
+# vggt needs >=3.10; 3.13+ lacks wheels for parts of the stack.
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    # PyTorch comes from the CUDA 12.8 index below (needed for RTX 50xx, fine for 30xx/40xx).
+    "torch>=2.7",
+    "torchvision>=0.22",
+    # vggt pins numpy<2 — keep the whole env on numpy 1.x to avoid ABI clashes.
+    "numpy>=1.26,<2",
+    "opencv-python>=4.8",
+    "pillow>=9",
+    "scipy>=1.10",
+    "matplotlib>=3.7",
+    "pandas>=2.0",
+    "openpyxl>=3.1",
+    "tqdm",
+    # Local L2CS-Net with IEF extensions (editable: edits in l2cs_net/ apply immediately).
+    "l2cs",
+    # GitHub-only packages (pinned to exact commits in [tool.uv.sources] below).
+    "vggt",
+    "deepgaze-pytorch",
+    "face-detection",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv]
+# The top-level scripts are run directly, not installed as a package.
+package = false
+
+[tool.uv.sources]
+l2cs = { path = "l2cs_net", editable = true }
+vggt = { git = "https://github.com/facebookresearch/vggt", rev = "a288dd0f14786c93483e45524328726ab7b1b4ce" }
+# DeepGaze is pinned before the MSDB model was added (Feb 2026): newer commits make
+# `import deepgaze_pytorch` require OpenAI CLIP even though we only use DeepGaze IIE.
+deepgaze-pytorch = { git = "https://github.com/matthias-k/DeepGaze", rev = "874f12e1ee519860f49860638cf7f6375956d45a" }
+face-detection = { git = "https://github.com/elliottzheng/face-detection", rev = "786fbab7095623c348e251f1f0a8b323721c6a84" }
+torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

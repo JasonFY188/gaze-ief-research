@@ -47,8 +47,7 @@ from paths import (
 )
 del _HERE
 
-sys.path.insert(0, IEF_REPO)
-
+# l2cs is installed from l2cs_net/ into the environment (see README), so no sys.path hack is needed.
 from l2cs import Pipeline                                          # type: ignore
 from l2cs.model import L2CS                                        # type: ignore
 from l2cs.wrapper import L2CSWrapper                               # type: ignore
@@ -1125,7 +1124,7 @@ def main() -> None:
 
     if not os.path.isfile(CENTERBIAS_NPY):
         raise RuntimeError(f"centerbias file not found: {CENTERBIAS_NPY}\n"
-                           "Run from /home/keisokulab/gaze-estimation/")
+                           "Place it there or set CENTERBIAS_NPY in paths_local.py")
 
     data_roots = discover_scenario_roots(BASE_ROOT)
     if not data_roots:
@@ -1136,7 +1135,9 @@ def main() -> None:
 
     # ---- Load models ----
     print("\n[LOAD] VGGT …", flush=True)
-    vggt_model = VGGT.from_pretrained(VGGT_SOURCE).to(dtype).to(device_str)
+    # Keep VGGT weights in float32: autocast (see _run_shared_features) handles fp16. VGGT's heads disable
+    # autocast internally, so fp16 weights crash with "expected scalar type Float but found Half".
+    vggt_model = VGGT.from_pretrained(VGGT_SOURCE).to(device_str)
     vggt_model.eval()
 
     print("[LOAD] L2CS (face detector) …", flush=True)
