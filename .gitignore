@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Model weights (download separately — see README)
+*.pkl
+*.pt
+*.pth
+*.safetensors
+*.onnx
+*.npy
+
+# Datasets and outputs
+datasets/
+data/
+output*/
+outputs/
+outputs_ief/
+outputs_batch/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Logs
+*.log
+run_log.txt
