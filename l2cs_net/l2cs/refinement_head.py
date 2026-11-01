@@ -2,7 +2,7 @@
 IEF (Iterative Error Feedback) refinement head for L2CS-Net gaze estimation.
 
 Conceptual reference: Carreira et al., "Human Pose Estimation with Iterative
-Error Feedback", CVPR 2016 (arXiv:1507.06550).
+Error Feedback", 2016 (arXiv:1507.06550).
 
 Two head variants (select via RefinementConfig.head_type):
   "mlp"  — pools the feature map globally then runs an MLP (Step 3, baseline)

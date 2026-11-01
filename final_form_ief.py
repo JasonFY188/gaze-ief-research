@@ -8,7 +8,7 @@ Per-fold output goes to:
   data_root/outputs_ief/<variant>/fold<N>/<subscenario>/<primary>/
 
 Summary Excel files (one per person × distance) go to:
-  ~/Documents/output of ief/
+  SUMMARY_OUT_DIR in paths.py (environment variable GAZE_OUTPUT_DIR)
 
 At the end a mean ± std table of angular_error_peak_deg is printed for
 every variant × distance combination.
@@ -1125,7 +1125,7 @@ def main() -> None:
 
     if not os.path.isfile(CENTERBIAS_NPY):
         raise RuntimeError(f"centerbias file not found: {CENTERBIAS_NPY}\n"
-                           "Run from /home/keisokulab/gaze-estimation/")
+                           "Run from the repository root, or set CENTERBIAS_NPY in paths.py")
 
     data_roots = discover_scenario_roots(BASE_ROOT)
     if not data_roots:

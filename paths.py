@@ -17,24 +17,20 @@ def _p(*parts):
         return os.path.join(PACKAGE_ROOT, *parts)
     return os.path.join(*parts)
 
+# Every path can be set with an environment variable (see .env.example); the defaults are placeholders.
+
 # ----- DATASET ----------------------------------------------------------------
-BASE_ROOT = _p("/home/keisokulab/Downloads/Jikken_2 (3rd copy)")
+BASE_ROOT = _p(os.environ.get("GAZE_DATASET_ROOT", "data/scenes"))
 
 # ----- L2CS library (IEF repo) ------------------------------------------------
-IEF_REPO = _p("/home/keisokulab/Downloads/Dealing with uncertainty from l2cs net/L2CS-Net")
+IEF_REPO = _p(os.environ.get("IEF_REPO", os.path.join(os.path.dirname(__file__), "l2cs_net")))
 
 # ----- Plain L2CS weights — used ONLY for face detection ----------------------
-L2CS_WEIGHTS = _p("/home/keisokulab/learning_workshop/L2CSNet_gaze360.pkl")
+L2CS_WEIGHTS = _p(os.environ.get("L2CS_WEIGHTS", "models/L2CSNet_gaze360.pkl"))
 
 # ----- IEF backbone weights ---------------------------------------------------
-GAZE360_BACKBONE = _p(
-    "/home/keisokulab/Downloads/Dealing with uncertainty from l2cs net"
-    "/Gaze360-20260603T102045Z-3-001/Gaze360/L2CSNet_gaze360.pkl"
-)
-MPIIGAZE_BACKBONE_DIR = _p(
-    "/home/keisokulab/Downloads/Dealing with uncertainty from l2cs net"
-    "/MPIIGaze-20260529T070835Z-3-001"
-)
+GAZE360_BACKBONE = _p(os.environ.get("GAZE360_BACKBONE", "models/Gaze360/L2CSNet_gaze360.pkl"))
+MPIIGAZE_BACKBONE_DIR = _p(os.environ.get("MPIIGAZE_BACKBONE_DIR", "models/MPIIGaze"))
 
 # ----- centerbias (relative to gaze-estimation/ dir is fine) -----------------
 CENTERBIAS_NPY = _p(os.path.dirname(__file__), "centerbias_mit1003.npy")
@@ -51,4 +47,4 @@ VGGT_SOURCE = "facebook/VGGT-1B"
 DEEPGAZE_CACHE = None
 
 # ----- Output summary directory -----------------------------------------------
-SUMMARY_OUT_DIR = os.path.expanduser("~/Documents/output of ief")
+SUMMARY_OUT_DIR = os.environ.get("GAZE_OUTPUT_DIR", "outputs_ief")

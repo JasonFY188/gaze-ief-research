@@ -6,7 +6,8 @@ from l2cs.model import L2CS
 from l2cs.wrapper import L2CSWrapper
 from l2cs.refinement_head import RefinementConfig, IEFGazeModel
 
-CKPT = r"C:\Users\keiso\Jason\Dealing with uncertainty from l2cs net\L2CS-Net\output\refinement\best_fold0.pt"
+import os
+CKPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "output", "refinement", "best_fold0.pt")
 
 base    = L2CS(torchvision.models.resnet.Bottleneck, [3, 4, 6, 3], num_bins=90)
 wrapper = L2CSWrapper(base)

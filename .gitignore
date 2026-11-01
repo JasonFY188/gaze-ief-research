@@ -29,3 +29,13 @@ outputs_batch/
 # Logs
 *.log
 run_log.txt
+
+# Licensed datasets, weights and private notes: never commit
+models/
+checkpoints/
+Screenshots/
+evaluation/
+*.xlsx
+.env
+CLAUDE.md
+

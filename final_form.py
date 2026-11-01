@@ -45,7 +45,7 @@ warnings.filterwarnings("ignore", message=".*flash attention.*", category=UserWa
 # CONFIG
 # =============================================================================
 # Point to the top-level experiment folder — everything else is auto-discovered.
-BASE_ROOT = r"/home/keisokulab/Downloads/Jikken_2 (3rd copy)"
+BASE_ROOT = os.environ.get("GAZE_DATASET_ROOT", "data/scenes")
 
 # Optional filters — set None to process everything found under BASE_ROOT.
 # ONLY_SCENARIO_NAME   : name of the scenario root folder  (e.g. "scenario_1_4m")
@@ -63,7 +63,7 @@ REF_IMAGE_NAMES = ["view1.jpg", "view2.jpg"]
 DEEPGAZE_VIEW_IDXS = [2]
 GAZE_VIEW_IDX = 0
 
-L2CS_WEIGHTS = r"/home/keisokulab/learning_workshop/L2CSNet_gaze360.pkl"
+L2CS_WEIGHTS = os.environ.get("L2CS_WEIGHTS", "models/L2CSNet_gaze360.pkl")
 CENTERBIAS_NPY = r"centerbias_mit1003.npy"
 
 DEEPGAZE_MAX_DIM = 1024
@@ -127,7 +127,7 @@ CONE_ABLATION = [
 ]
 
 # Output folder for per-person per-distance Excel summaries (created automatically).
-SUMMARY_OUT_DIR = r"/home/keisokulab/Desktop/final_form"
+SUMMARY_OUT_DIR = os.environ.get("GAZE_OUTPUT_DIR", "outputs")
 
 # Maps the top-level person folder name under BASE_ROOT to a readable label.
 PERSON_LABEL_MAP: Dict[str, str] = {

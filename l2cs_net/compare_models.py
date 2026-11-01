@@ -16,9 +16,10 @@ import os
 import re
 
 
-NATIVE_TXT = r"C:\Users\keiso\Jason\Dealing with uncertainty from l2cs net\L2CS-Net\output\eval_native\eval_all_folds.txt"
-IEF_TXT    = r"C:\Users\keiso\Jason\Dealing with uncertainty from l2cs net\L2CS-Net\output\eval_ief\ief_all_folds.txt"
-OUT_DIR    = r"C:\Users\keiso\Jason\Dealing with uncertainty from l2cs net\L2CS-Net\output\comparison"
+HERE       = os.path.dirname(os.path.abspath(__file__))
+NATIVE_TXT = os.path.join(HERE, "output", "eval_native", "eval_all_folds.txt")
+IEF_TXT    = os.path.join(HERE, "output", "eval_ief", "ief_all_folds.txt")
+OUT_DIR    = os.path.join(HERE, "output", "comparison")
 
 
 def parse_results_txt(path):
