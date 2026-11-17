@@ -188,7 +188,7 @@ def run(args):
         anchor = rel(args.anchor) if args.anchor else None
         K_anchor = phone_K(os.path.join(HERE, anchor)) if anchor else None
         print(f"[run] saved room map {map_dir} ({len(map_photos)} photos, short-side FOV {args.map_fov_short})"
-              f"{'; robot camera position = where ' + anchor + ' was taken' if anchor else ''}")
+              f"{'; extra structure: ' + anchor if anchor else ''}; robot camera position: from its own photo")
     else:
         room = args.room or latest_robot_room()
         if room is None or args.rescan:
@@ -220,8 +220,11 @@ def run(args):
                   f"{plan['robot_tilt']:+.0f}; sees {plan['captured']:.0%} of the footprint "
                   f"(now {plan['captured_without_turning']:.0%}); {plan['secs_total']} s")
             if plan.get("robot_cam_vggt_to_anchor") is not None:
-                print(f"[run] check: robot camera (VGGT) is {plan['robot_cam_vggt_to_anchor']:.2f} VGGT units from the "
-                      f"anchor spot (eye-camera distance {plan['eye_to_robot_cam']:.2f} units)")
+                print(f"[run] robot camera is {plan['robot_cam_vggt_to_anchor']:.2f} VGGT units from the anchor photo's "
+                      f"spot (room size {plan['map_size']:.2f}, eye-camera {plan['eye_to_robot_cam']:.2f})")
+            if plan["cone_half"] >= 45:
+                print(f"[run] WARNING: gaze very uncertain (cone ±{plan['cone_half']:.0f} deg). Face the camera at ~1.5 m, "
+                      f"camera at face height, turn your HEAD to the object.")
         else:
             plan = brain.plan(room_paths, person, K, K, cam.hfov, cam.vfov, room_pans=room_pans, pan_limits=PAN_LIMITS)
             plan.update(person_robot_pan=pan0, person_robot_tilt=tilt0, room=room)

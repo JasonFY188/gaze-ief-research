@@ -29,7 +29,9 @@ HOME_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "arm_home.j
 
 # Conservative software limits (deg), inside the PiPER's mechanical limits.
 LIMITS = [(-150, 150), (0, 180), (-170, 0), (-100, 100), (-70, 70), (-120, 120)]
-PAN_SIGN, TILT_SIGN = +1, +1     # flip to -1 if pan/tilt turn the wrong way (see README)
+# pan + = turn right, tilt + = look up (active_camera.py convention). Checked with robot/piper_fk.py and on the arm
+# (2026-11-17): J1 + turns the camera LEFT, J5 + makes it look DOWN at the home pose -> both signs are -1.
+PAN_SIGN, TILT_SIGN = -1, -1
 MAX_SPEED = 30                   # % of max speed
 TOL_DEG = 1.0                    # "reached" tolerance
 
@@ -39,12 +41,17 @@ piper.ConnectPort()
 time.sleep(0.5)
 
 
+# Standard start pose (2026-11-17): arm standing up, bent ~90 deg, camera level (elevation 0.0 deg, 0.47 m high)
+# and straight ahead, from robot/level_home.py. Used whenever arm_home.json is missing.
+DEFAULT_HOME = [0.0, 26.8, -62.6, 0.0, 40.8, 0.0]
+
+
 def load_home():
     try:
         with open(HOME_FILE) as f:
             return json.load(f)["joints_deg"]
     except (OSError, KeyError, ValueError):
-        return None
+        return list(DEFAULT_HOME)
 
 
 def joints_deg():

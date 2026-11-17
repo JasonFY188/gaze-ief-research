@@ -247,9 +247,9 @@ class Brain:
             robot tilt = tilt0 + (search tilt - elevation of the person photo)
         Photos of different shapes (iPhone portrait, RealSense landscape) are padded to SQ x SQ squares.
 
-        anchor (optional): an earlier photo taken FROM THE ROBOT'S SPOT (e.g. the iPhone person photo). It is added
-        to the VGGT run as extra room structure, and its camera centre is used as the robot camera position
-        (the robot's own photo still gives the current face, gaze and heading).
+        anchor (optional): an earlier photo of the scene (e.g. the iPhone person photo), added to the VGGT run as extra
+        room structure. The robot camera position is where VGGT places the robot's own photo; the result reports
+        how far that is from the anchor's camera (robot_cam_vggt_to_anchor).
 
         arm (optional): {"radius_m": camera distance from the J1 axis (robot/piper_fk.py),
                          "m_per_unit": metres per VGGT unit}. With both, the camera centre swings around the base
@@ -274,8 +274,10 @@ class Brain:
         _, _, vt = np.linalg.svd(fwd[:nR])                       # the room circle was taken level -> its normal is "up"
         up = vt[2] if vt[2] @ (-extr[0][1, :3]) > 0 else -vt[2]
         centers = np.stack([-e[:3, :3].T @ e[:3, 3] for e in extr])
-        # search FROM the robot camera (anchor spot if given, else VGGT's estimate), relative to the robot's view
-        cam = centers[iA] if iA is not None else centers[iP]
+        # search FROM the robot camera where VGGT places the robot's own photo, relative to the robot's view.
+        # (First robot run, 2026-11-17: the robot stood ~1/4 of the room away from the anchor spot; using the anchor
+        # centre turned the arm to the wrong side. The anchor now only adds room structure.)
+        cam = centers[iP]
         ref = fwd[iP]
 
         P, area = [], []
