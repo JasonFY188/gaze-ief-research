@@ -30,7 +30,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from PIL import Image
-from scipy.special import logsumexp
+from scipy.special import erfinv, logsumexp
 
 from l2cs import Pipeline  # type: ignore
 from vggt.models.vggt import VGGT  # type: ignore
@@ -80,6 +80,12 @@ CONE_SAMPLES = 2000
 CONE_MIN_DEG = 8.0
 CONE_MAX_DEG = 60.0
 
+# Elliptical cone: separate half-widths for yaw and pitch (see ellipse_axes_from_probs).
+ELLIPSE_MIN_DEG = BIN_WIDTH_DEG   # one L2CS bin; narrower is below the model's resolution
+ELLIPSE_MAX_DEG = CONE_MAX_DEG
+ELLIPSE_BIN_JITTER = True         # sample uniformly inside each 4-degree bin (smooth quantiles)
+ELLIPSE_SEED = 0                  # fixed seed so the ellipse is reproducible
+
 MASK_OUTSIDE_DARK = 0.0
 
 BETA = 1.0
@@ -124,6 +130,16 @@ CONE_ABLATION = [
     {"name": "fixed_60",    "dynamic": False, "quantile": None,  "fixed_deg": 60.0},
     {"name": "fixed_30",    "dynamic": False, "quantile": None,  "fixed_deg": 30.0},
     {"name": "fixed_15",    "dynamic": False, "quantile": None,  "fixed_deg": 15.0},
+    # Ellipse: yaw and pitch get their own half-width (shape="ellipse").
+    #   per_axis: each axis covers `quantile` on its own -> together only ~85-90% for q=0.95.
+    #   joint   : same yaw/pitch ratio, scaled so `quantile` of the L2CS samples fall inside.
+    {"name": "ellipse_axis_q95",  "dynamic": True, "quantile": 0.95, "fixed_deg": None,
+     "shape": "ellipse", "ellipse_mode": "per_axis"},
+    {"name": "ellipse_joint_q95", "dynamic": True, "quantile": 0.95, "fixed_deg": None,
+     "shape": "ellipse", "ellipse_mode": "joint"},
+    # 99% per axis: together ~96% for a normal distribution, i.e. close to the joint 95% ellipse
+    {"name": "ellipse_axis_q99",  "dynamic": True, "quantile": 0.99, "fixed_deg": None,
+     "shape": "ellipse", "ellipse_mode": "per_axis"},
 ]
 
 # Output folder for per-person per-distance Excel summaries (created automatically).
@@ -142,6 +158,7 @@ SUMMARY_AVG_COLS = [
     "auc", "ap",
     "dist_px_to_gt_centroid", "dist_px_to_gt_centroid_l2cs",
     "angular_error_l2cs_deg", "angular_error_peak_deg",
+    "ellipse_yaw_half_deg", "ellipse_pitch_half_deg", "ellipse_joint_coverage", "area_vs_circle",
 ]
 
 # =============================================================================
@@ -241,6 +258,107 @@ def cone_half_angle_from_probs(
     ang_deg = np.rad2deg(np.arccos(cosang))
     half_angle = float(np.quantile(ang_deg, quantile))
     return float(np.clip(half_angle, min_deg, max_deg))
+
+
+# -----------------------------------------------------------------------------
+# Elliptical cone: yaw and pitch uncertainty kept separate
+# -----------------------------------------------------------------------------
+def wrap_deg(x):
+    """Angle difference wrapped to [-180, 180)."""
+    return (np.asarray(x) + 180.0) % 360.0 - 180.0
+
+
+def ellipse_axes_from_probs(
+    yaw_probs: np.ndarray,
+    pitch_probs: np.ndarray,
+    bin_angles_deg: np.ndarray,
+    yaw_mean_deg: float,
+    pitch_mean_deg: float,
+    quantile: float = 0.95,
+    mode: str = "per_axis",
+    num_samples: int = 2000,
+    min_deg: float = 4.0,
+    max_deg: float = 60.0,
+    jitter: bool = True,
+    seed: Optional[int] = 0,
+) -> Tuple[float, float, float]:
+    """
+    Half-widths (yaw_half_deg, pitch_half_deg) of an elliptical gaze cone, plus the fraction of
+    L2CS samples that fall inside it.
+
+    Samples (yaw, pitch) from the two L2CS bin distributions (independent, as in
+    cone_half_angle_from_probs) and measures each axis around the predicted gaze:
+      per_axis: yaw_half = q-quantile of |yaw - yaw_mean|, pitch_half likewise.
+                Each axis alone covers q; both together cover less (~0.85-0.90 for q=0.95).
+      joint   : start from per_axis, then scale both half-widths by the same factor so that
+                q of the samples satisfy (dyaw/yaw_half)^2 + (dpitch/pitch_half)^2 <= 1.
+    The ellipse lives in (yaw, pitch) angle space, the space L2CS predicts in.
+    """
+    rng = np.random.default_rng(seed)
+    yp = yaw_probs.astype(np.float64)
+    pp = pitch_probs.astype(np.float64)
+    yp /= (yp.sum() + 1e-12)
+    pp /= (pp.sum() + 1e-12)
+    ys = rng.choice(bin_angles_deg, size=num_samples, p=yp).astype(np.float64)
+    ps = rng.choice(bin_angles_deg, size=num_samples, p=pp).astype(np.float64)
+    if jitter:
+        half_bin = 0.5 * float(bin_angles_deg[1] - bin_angles_deg[0])
+        ys += rng.uniform(-half_bin, half_bin, num_samples)
+        ps += rng.uniform(-half_bin, half_bin, num_samples)
+
+    dy = wrap_deg(ys - yaw_mean_deg)
+    dp = ps - pitch_mean_deg
+    a = float(np.clip(np.quantile(np.abs(dy), quantile), min_deg, max_deg))
+    b = float(np.clip(np.quantile(np.abs(dp), quantile), min_deg, max_deg))
+    if mode == "joint":
+        r = np.sqrt((dy / a) ** 2 + (dp / b) ** 2)
+        s = float(np.quantile(r, quantile))
+        a = float(np.clip(a * s, min_deg, max_deg))
+        b = float(np.clip(b * s, min_deg, max_deg))
+    elif mode != "per_axis":
+        raise ValueError(f"unknown ellipse mode: {mode}")
+    coverage = float(np.mean((dy / a) ** 2 + (dp / b) ** 2 <= 1.0))
+    return a, b, coverage
+
+
+def ellipse_boundary_z(quantile: float, mode: str) -> float:
+    """
+    How many standard deviations the ellipse edge is from the centre, for the soft geometry
+    likelihood G = exp(-0.5 * (m * z)^2), with m = 1 on the ellipse edge.
+      per_axis: each axis edge is the two-sided normal q-quantile (1.96 for q=0.95)
+      joint   : edge is the radius of a 2-D normal containing q (2.45 for q=0.95)
+    """
+    q = float(np.clip(quantile, 1e-4, 1.0 - 1e-4))
+    if mode == "per_axis":
+        return float(np.sqrt(2.0) * erfinv(q))
+    return float(np.sqrt(-2.0 * np.log(1.0 - q)))
+
+
+def yaw_pitch_offsets_deg(
+    points_world: np.ndarray,
+    origin3d: np.ndarray,
+    R_gaze_w2c: np.ndarray,
+    yaw_mean_deg: float,
+    pitch_mean_deg: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    For each 3D point: the (yaw, pitch) a gaze from origin3d would need to hit it, minus the
+    predicted (yaw, pitch). Uses L2CS's convention in the gaze camera frame, i.e. the inverse of
+    gaze_vector_from_angles: dir_cam = -[sin(y)cos(p), sin(p), cos(y)cos(p)].
+    Returns (d_yaw_deg, d_pitch_deg, distance). Non-finite points give NaN.
+    """
+    V = points_world.astype(np.float64) - origin3d.astype(np.float64)[None, :]
+    dist = np.linalg.norm(V, axis=1)
+    d_cam = V @ R_gaze_w2c.astype(np.float64).T
+    u = -d_cam / (np.linalg.norm(d_cam, axis=1, keepdims=True) + 1e-12)
+    pitch = np.rad2deg(np.arcsin(np.clip(u[:, 1], -1.0, 1.0)))
+    yaw = np.rad2deg(np.arctan2(u[:, 0], u[:, 2]))
+    return wrap_deg(yaw - yaw_mean_deg), pitch - pitch_mean_deg, dist
+
+
+def ellipse_radius(d_yaw_deg: np.ndarray, d_pitch_deg: np.ndarray, a_deg: float, b_deg: float) -> np.ndarray:
+    """Normalised ellipse radius m: m <= 1 inside the cone, m = 1 on its edge."""
+    return np.sqrt((d_yaw_deg / a_deg) ** 2 + (d_pitch_deg / b_deg) ** 2)
 
 
 def estimate_eye_origin_world(
@@ -1229,22 +1347,55 @@ def _run_cone_condition(
     H_net        = shared["H_net"]
     W_net        = shared["W_net"]
 
-    # Cone angle for this condition
-    if cone_cfg["dynamic"]:
-        cone_angle_deg = cone_half_angle_from_probs(
-            yaw_probs=yaw_probs, pitch_probs=pitch_probs,
-            bin_angles_deg=bin_angles_deg,
-            num_samples=CONE_SAMPLES, quantile=cone_cfg["quantile"],
-            min_deg=CONE_MIN_DEG, max_deg=CONE_MAX_DEG,
-        )
-    else:
-        cone_angle_deg = float(cone_cfg["fixed_deg"])
-
-    cone_angle_rad = float(np.deg2rad(cone_angle_deg))
-    sigma_theta = sigma_from_cone_quantile(cone_angle_rad, CONE_QUANTILE)
-
     pts_all = world_points.reshape(-1, 3)
-    inside, _dist = compute_cone_mask_for_points(pts_all, origin3d, dir_world, cone_angle_deg)
+    shape = cone_cfg.get("shape", "circle")
+    ell: Optional[Dict[str, Any]] = None
+
+    if shape == "ellipse":
+        # Elliptical cone: separate yaw / pitch half-widths in L2CS's (yaw, pitch) angle space.
+        q = float(cone_cfg["quantile"])
+        mode = cone_cfg.get("ellipse_mode", "per_axis")
+        a_deg, b_deg, coverage = ellipse_axes_from_probs(
+            yaw_probs=yaw_probs, pitch_probs=pitch_probs, bin_angles_deg=bin_angles_deg,
+            yaw_mean_deg=yaw_deg, pitch_mean_deg=pitch_deg, quantile=q, mode=mode,
+            num_samples=CONE_SAMPLES, min_deg=ELLIPSE_MIN_DEG, max_deg=ELLIPSE_MAX_DEG,
+            jitter=ELLIPSE_BIN_JITTER, seed=ELLIPSE_SEED,
+        )
+        # the circular cone at the same quantile, only for comparison (area ratio)
+        circle_deg = cone_half_angle_from_probs(
+            yaw_probs=yaw_probs, pitch_probs=pitch_probs, bin_angles_deg=bin_angles_deg,
+            num_samples=CONE_SAMPLES, quantile=q, min_deg=CONE_MIN_DEG, max_deg=CONE_MAX_DEG,
+        )
+        z_edge = ellipse_boundary_z(q, mode)
+        R_gaze = extrinsic_np[GAZE_VIEW_IDX][:3, :3]
+        ell = {
+            "mode": mode, "a_deg": a_deg, "b_deg": b_deg, "coverage": coverage, "z_edge": z_edge,
+            "circle_deg": circle_deg, "area_vs_circle": (a_deg * b_deg) / (circle_deg ** 2 + 1e-12),
+            "R_gaze": R_gaze,
+        }
+        cone_angle_deg = max(a_deg, b_deg)          # widest direction, reported as "half-angle"
+        cone_angle_rad = float(np.deg2rad(cone_angle_deg))
+        sigma_theta = cone_angle_rad / z_edge       # only used for reporting / the ALPHA=None fallback
+
+        d_yaw, d_pitch, dist = yaw_pitch_offsets_deg(pts_all, origin3d, R_gaze, yaw_deg, pitch_deg)
+        m_all = ellipse_radius(d_yaw, d_pitch, a_deg, b_deg)
+        inside = (m_all <= 1.0) & (dist > 0.20)     # same 20 cm face exclusion as the circle
+    else:
+        # Cone angle for this condition
+        if cone_cfg["dynamic"]:
+            cone_angle_deg = cone_half_angle_from_probs(
+                yaw_probs=yaw_probs, pitch_probs=pitch_probs,
+                bin_angles_deg=bin_angles_deg,
+                num_samples=CONE_SAMPLES, quantile=cone_cfg["quantile"],
+                min_deg=CONE_MIN_DEG, max_deg=CONE_MAX_DEG,
+            )
+        else:
+            cone_angle_deg = float(cone_cfg["fixed_deg"])
+
+        cone_angle_rad = float(np.deg2rad(cone_angle_deg))
+        sigma_theta = sigma_from_cone_quantile(cone_angle_rad, CONE_QUANTILE)
+        inside, _dist = compute_cone_mask_for_points(pts_all, origin3d, dir_world, cone_angle_deg)
+
     cone_pts = pts_all[inside] if inside.sum() > 0 else np.zeros((0, 3), dtype=np.float32)
 
     _projected_imgs, projected_masks = project_blob_to_images(
@@ -1259,6 +1410,12 @@ def _run_cone_condition(
                 f"dynamic={cone_cfg['dynamic']}\nyaw_deg={yaw_deg:.3f}\npitch_deg={pitch_deg:.3f}\n"
                 f"cone_half_angle_deg={cone_angle_deg:.3f}\nsigma_theta_deg={np.rad2deg(sigma_theta):.3f}\n"
                 f"use_gradcam={USE_GRADCAM_L2CS}\n")
+        if ell is not None:
+            f.write(f"cone_shape=ellipse\nellipse_mode={ell['mode']}\n"
+                    f"ellipse_yaw_half_deg={ell['a_deg']:.3f}\nellipse_pitch_half_deg={ell['b_deg']:.3f}\n"
+                    f"ellipse_joint_coverage={ell['coverage']:.3f}\n"
+                    f"circle_half_angle_same_q_deg={ell['circle_deg']:.3f}\n"
+                    f"area_vs_circle={ell['area_vs_circle']:.3f}\n")
 
     for v in DEEPGAZE_VIEW_IDXS:
         mask_u8 = _mask_to_u8(projected_masks[v])
@@ -1308,7 +1465,18 @@ def _run_cone_condition(
         theta = cv2.resize(theta_net, (Wd, Hd), interpolation=cv2.INTER_LINEAR).astype(np.float32)
 
         alpha_val = float(ALPHA) if ALPHA is not None else float(np.clip(0.05 / (sigma_theta ** 2 + 1e-12), 0.5, 6.0))
-        G = normalize_prob_map(geometry_likelihood(theta, sigma_theta))
+        if ell is None:
+            G = normalize_prob_map(geometry_likelihood(theta, sigma_theta))
+        else:
+            # soft ellipse: G = exp(-0.5 (m z)^2), m = normalised ellipse radius (1 on the edge)
+            d_yaw_v, d_pitch_v, _ = yaw_pitch_offsets_deg(
+                world_points[v].reshape(-1, 3), origin3d, ell["R_gaze"], yaw_deg, pitch_deg)
+            m_net = ellipse_radius(d_yaw_v, d_pitch_v, ell["a_deg"], ell["b_deg"]).astype(np.float32)
+            m_net[~np.isfinite(m_net)] = 1e3
+            m_net = m_net.reshape(world_points[v].shape[0], world_points[v].shape[1])
+            m_map = cv2.resize(m_net, (Wd, Hd), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+            np.save(os.path.join(out_dir, f"ellipse_m_view_{v}.npy"), m_map)
+            G = normalize_prob_map(np.exp(-0.5 * (m_map * ell["z_edge"]) ** 2).astype(np.float32))
         H_fused = fuse_poe(G, S_sal, alpha=alpha_val, beta=BETA, eps=EPS)
 
         np.save(os.path.join(out_dir, f"deepgaze_sal_view_{v}.npy"), S_sal)
@@ -1410,6 +1578,13 @@ def _run_cone_condition(
                 "angular_error_peak_deg": ang_err_peak,
                 "gt_soft_sigma_px": float(_soft_gt_sigma_px(Hd, Wd)) if USE_SOFT_GT_FOR_METRICS else None,
                 "use_gradcam": bool(USE_GRADCAM_L2CS),
+                "cone_shape": "ellipse" if ell is not None else "circle",
+                "ellipse_mode": ell["mode"] if ell is not None else None,
+                "ellipse_yaw_half_deg": ell["a_deg"] if ell is not None else None,
+                "ellipse_pitch_half_deg": ell["b_deg"] if ell is not None else None,
+                "ellipse_joint_coverage": ell["coverage"] if ell is not None else None,
+                "circle_half_angle_same_q_deg": ell["circle_deg"] if ell is not None else None,
+                "area_vs_circle": ell["area_vs_circle"] if ell is not None else None,
             })
 
         del image_tensor, centerbias_tensor, log_density_prediction

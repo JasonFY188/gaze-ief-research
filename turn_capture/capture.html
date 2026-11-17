@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Turn Capture</title>
+<style>
+  /* full-screen camera; a dial + level on top; tokens kept small (this page is mostly camera) */
+  :root {
+    --bg: #0d1113; --panel: rgba(13,17,19,.72); --fg: #eef3f2; --muted: #9aa8a6;
+    --go: #3ddc97; --wait: #ffc857; --bad: #ff6b6b; --line: rgba(238,243,242,.25);
+    --font: -apple-system, "SF Pro Text", "Helvetica Neue", "Hiragino Sans", sans-serif;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font); }
+  body { overflow: hidden; -webkit-user-select: none; user-select: none; }
+  #video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; }
+  #flash { position: fixed; inset: 0; background: #fff; opacity: 0; pointer-events: none; transition: opacity .25s; }
+  .top { position: fixed; left: 0; right: 0; top: 0; padding: calc(env(safe-area-inset-top,0px) + 10px) max(14px, env(safe-area-inset-right,0px)) 10px max(14px, env(safe-area-inset-left,0px));
+         background: linear-gradient(var(--panel), rgba(13,17,19,0)); display: flex; gap: 12px; align-items: flex-start; }
+  #dial { width: 132px; height: 132px; flex: none; }
+  .read { flex: 1; min-width: 0; display: grid; gap: 4px; }
+  .big { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .say { font-size: 19px; font-weight: 700; }
+  .say.go { color: var(--go); } .say.wait { color: var(--wait); } .say.bad { color: var(--bad); }
+  .small { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  /* level: a crosshair in the middle of the screen */
+  #level { position: fixed; left: 50%; top: 50%; width: 180px; height: 180px; margin: -90px 0 0 -90px; pointer-events: none; }
+  .bottom { position: fixed; left: 0; right: 0; bottom: 0; padding: 12px max(14px, env(safe-area-inset-right,0px)) calc(env(safe-area-inset-bottom,0px) + 14px) max(14px, env(safe-area-inset-left,0px));
+            background: linear-gradient(rgba(13,17,19,0), var(--panel) 35%); display: grid; gap: 10px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button, select { font: inherit; font-size: 16px; border-radius: 12px; border: 1px solid var(--line); background: rgba(255,255,255,.08); color: var(--fg); padding: 10px 14px; }
+  button.primary { background: var(--go); color: #06281a; border-color: transparent; font-weight: 700; }
+  button:disabled { opacity: .4; }
+  button:focus-visible, select:focus-visible { outline: 3px solid var(--wait); outline-offset: 2px; }
+  #shutter { width: 64px; height: 64px; border-radius: 50%; padding: 0; border: 4px solid var(--fg); background: rgba(255,255,255,.2); }
+  .grow { flex: 1; }
+  /* start screen */
+  #start { position: fixed; inset: 0; background: var(--bg); overflow-y: auto; padding: calc(env(safe-area-inset-top,0px) + 24px) max(20px, env(safe-area-inset-right,0px)) 32px max(20px, env(safe-area-inset-left,0px)); }
+  #start h1 { font-size: 26px; margin: 0 0 6px; }
+  #start p { color: var(--muted); line-height: 1.5; margin: 0 0 14px; max-width: 34em; }
+  #start label { display: grid; gap: 6px; margin: 0 0 14px; font-weight: 600; }
+  #start .hint { font-weight: 400; color: var(--muted); font-size: 13px; }
+  #err { color: var(--bad); white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<video id="video" playsinline muted autoplay></video>
+<div id="flash"></div>
+<svg id="level" viewBox="-90 -90 180 180" aria-hidden="true">
+  <circle r="34" fill="none" stroke="rgba(255,255,255,.5)" stroke-width="2"/>
+  <line x1="-80" y1="0" x2="-40" y2="0" stroke="rgba(255,255,255,.5)" stroke-width="2"/>
+  <line x1="40" y1="0" x2="80" y2="0" stroke="rgba(255,255,255,.5)" stroke-width="2"/>
+  <g id="bubble"><circle r="9" fill="#ffc857"/><line id="horizon" x1="-60" y1="0" x2="60" y2="0" stroke="#ffc857" stroke-width="3"/></g>
+</svg>
+
+<div class="top" id="hud" hidden>
+  <canvas id="dial" width="264" height="264"></canvas>
+  <div class="read">
+    <div class="say wait" id="say">Starting…</div>
+    <div class="big" id="yawtxt">0°</div>
+    <div class="small" id="tilttxt">tilt 0° · roll 0°</div>
+    <div class="small" id="counttxt">spot 1 · 0 / 0 photos</div>
+  </div>
+</div>
+
+<div class="bottom" id="controls" hidden>
+  <div class="small" id="status">Hold the phone upright and turn slowly. Photos are taken automatically: no need to press the round button (it only adds an extra photo).</div>
+  <div class="row">
+    <button id="zero" type="button">Set 0° here</button>
+    <button id="redo" type="button">Redo last</button>
+    <span class="grow"></span>
+    <button id="shutter" type="button" aria-label="Take a photo now"></button>
+  </div>
+  <div class="row">
+    <button id="next" type="button" class="primary grow">Next spot</button>
+    <button id="finish" type="button">Finish</button>
+  </div>
+</div>
+
+<div id="start">
+  <h1>Turn Capture</h1>
+  <p>Stand still, then turn on the spot. The phone's gyroscope measures how far you have turned, and a photo is taken automatically at every step (for example every 30°). Each photo is saved on the lab PC with its measured angle.</p>
+  <label for="step">Step between photos
+    <select id="step"><option value="30">30° (12 photos per circle)</option><option value="45">45° (8)</option><option value="60" selected>60° (6)</option><option value="20">20° (18)</option></select>
+  </label>
+  <label for="rings">Rows
+    <select id="rings"><option value="0" selected>Straight ahead only</option><option value="0,30">Straight ahead + looking up 30°</option><option value="0,30,-20">Straight + up 30° + down 20°</option></select>
+    <span class="hint">Looking up helps at look-alike places (signs and ceilings differ).</span>
+  </label>
+  <label for="tol">How exact
+    <select id="tol"><option value="1.5">±1.5° (slow)</option><option value="2.5" selected>±2.5°</option><option value="4">±4° (fast)</option></select>
+  </label>
+  <label for="name">Session name
+    <input id="name" type="text" style="font:inherit;font-size:16px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.08);color:var(--fg);padding:10px 14px" placeholder="e.g. floor2_spot2">
+  </label>
+  <button id="go" class="primary" type="button" style="width:100%;padding:14px">Start camera and sensors</button>
+  <p class="small" style="margin-top:14px">Tip for 3D (VGGT): turning on one point gives almost no depth. Do 2–3 spots about 1 m apart (tap "Next spot" between them).</p>
+  <p id="err"></p>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const D2R = Math.PI / 180, R2D = 180 / Math.PI;
+const S = {
+  step: 60, rings: [0], tol: 2.5, tiltTol: 3, rollTol: 3,
+  session: "", spot: 1, yaw0: null, yaw: 0, elev: 0, roll: 0, raw: null,
+  done: new Set(), hist: [], busy: false, shots: [], pending: 0, audio: null, lastEvt: 0,
+};
+
+// camera direction (device -Z) in the world frame from W3C Euler angles (Z-X'-Y'')
+function pose(a, b, g) {
+  const ca = Math.cos(a * D2R), sa = Math.sin(a * D2R), cb = Math.cos(b * D2R), sb = Math.sin(b * D2R),
+        cg = Math.cos(g * D2R), sg = Math.sin(g * D2R);
+  const dx = -ca * sg - sa * sb * cg, dy = -sa * sg + ca * sb * cg, dz = -cb * cg;
+  let heading = Math.atan2(dx, dy) * R2D;          // grows when you turn right (clockwise)
+  if (heading < 0) heading += 360;
+  const elev = Math.asin(Math.max(-1, Math.min(1, dz))) * R2D;      // + = looking up
+  const roll = Math.asin(Math.max(-1, Math.min(1, -sg * cb))) * R2D; // sideways lean of the phone
+  return { heading, elev, roll };
+}
+const wrap = (d) => ((d % 360) + 540) % 360 - 180;   // -180..180
+const rel = () => (S.yaw0 === null ? 0 : (S.yaw - S.yaw0 + 360) % 360);
+const key = (ring, t) => `${ring}|${t}`;
+
+function targets() {
+  const out = [];
+  for (const ring of S.rings) for (let t = 0; t < 360; t += S.step) out.push({ ring, t });
+  return out;
+}
+function nextTarget() {
+  // the nearest unfinished target in the current row; rows are done in order
+  for (const ring of S.rings) {
+    const left = targets().filter((x) => x.ring === ring && !S.done.has(key(ring, x.t)));
+    if (left.length) {
+      const r = rel();
+      // the closest unfinished angle; on a tie prefer the one to the RIGHT (we turn clockwise)
+      const cost = (x) => { const d = wrap(x.t - r); return Math.abs(d) + (d < 0 ? 0.5 : 0); };
+      left.sort((p, q) => cost(p) - cost(q));
+      return left[0];
+    }
+  }
+  return null;
+}
+
+function onOrient(e) {
+  if (e.alpha === null) return;
+  const p = pose(e.alpha, e.beta, e.gamma);
+  // smooth the heading on the unit circle
+  const k = 0.35;
+  if (S.raw === null) S.raw = { x: Math.cos(p.heading * D2R), y: Math.sin(p.heading * D2R) };
+  S.raw.x += k * (Math.cos(p.heading * D2R) - S.raw.x);
+  S.raw.y += k * (Math.sin(p.heading * D2R) - S.raw.y);
+  S.yaw = (Math.atan2(S.raw.y, S.raw.x) * R2D + 360) % 360;
+  S.elev += k * (p.elev - S.elev);
+  S.roll += k * (p.roll - S.roll);
+  S.angles = { alpha: e.alpha, beta: e.beta, gamma: e.gamma };
+  if (S.yaw0 === null) S.yaw0 = S.yaw;
+  const now = performance.now();
+  S.hist.push({ t: now, y: rel() });
+  while (S.hist.length && now - S.hist[0].t > 450) S.hist.shift();
+  S.lastEvt = now;
+}
+
+function steady() {
+  if (S.hist.length < 5) return false;
+  let mx = 0;
+  for (const h of S.hist) mx = Math.max(mx, Math.abs(wrap(h.y - S.hist[S.hist.length - 1].y)));
+  return mx < 1.2;
+}
+
+function draw() {
+  const c = $("dial"), g = c.getContext("2d"), W = c.width, R = W / 2 - 18;
+  g.clearRect(0, 0, W, W);
+  g.save(); g.translate(W / 2, W / 2);
+  g.fillStyle = "rgba(13,17,19,.65)"; g.beginPath(); g.arc(0, 0, R + 14, 0, 7); g.fill();
+  const tgt = nextTarget(), r = rel();
+  for (const x of targets()) {
+    if (x.ring !== (tgt ? tgt.ring : S.rings[S.rings.length - 1])) continue;
+    const a = (x.t - 90) * D2R, isDone = S.done.has(key(x.ring, x.t));
+    g.fillStyle = isDone ? "#3ddc97" : (tgt && x.t === tgt.t ? "#ffc857" : "rgba(238,243,242,.45)");
+    g.beginPath(); g.arc(R * Math.cos(a), R * Math.sin(a), isDone ? 9 : 7, 0, 7); g.fill();
+  }
+  const a = (r - 90) * D2R;   // needle = where the camera points now
+  g.strokeStyle = "#eef3f2"; g.lineWidth = 6; g.lineCap = "round";
+  g.beginPath(); g.moveTo(0, 0); g.lineTo((R - 14) * Math.cos(a), (R - 14) * Math.sin(a)); g.stroke();
+  g.fillStyle = "#eef3f2"; g.font = "bold 22px -apple-system, sans-serif"; g.textAlign = "center"; g.textBaseline = "middle";
+  g.fillText("0°", 0, -R + 26);
+  g.restore();
+
+  // level crosshair: bubble moves with tilt error, line tilts with roll
+  const want = tgt ? tgt.ring : 0;
+  const ey = Math.max(-70, Math.min(70, (S.elev - want) * 6));
+  $("bubble").setAttribute("transform", `translate(0 ${ey.toFixed(1)}) rotate(${(-S.roll).toFixed(1)})`);
+  const okTilt = Math.abs(S.elev - want) <= S.tiltTol && Math.abs(S.roll) <= S.rollTol;
+  $("bubble").querySelector("circle").setAttribute("fill", okTilt ? "#3ddc97" : "#ffc857");
+  $("horizon").setAttribute("stroke", okTilt ? "#3ddc97" : "#ffc857");
+
+  $("yawtxt").textContent = `${r.toFixed(1)}°`;
+  $("tilttxt").textContent = `tilt ${S.elev >= 0 ? "+" : ""}${S.elev.toFixed(1)}° (want ${want >= 0 ? "+" : ""}${want}°) · roll ${S.roll.toFixed(1)}°`;
+  $("counttxt").textContent = `spot ${S.spot} · ${S.done.size} / ${targets().length} photos · ${S.shots.length} saved${S.pending ? ` · ${S.pending} sending` : ""}`;
+
+  const say = $("say");
+  if (performance.now() - S.lastEvt > 1500) { say.className = "say bad"; say.textContent = "No motion sensor data"; return; }
+  if (!tgt) { say.className = "say go"; say.textContent = "Spot done ✓ — Next spot or Finish"; return; }
+  const d = wrap(tgt.t - r);
+  if (Math.abs(S.elev - want) > S.tiltTol) { say.className = "say wait"; say.textContent = S.elev < want ? "Tilt the phone UP" : "Tilt the phone DOWN"; }
+  else if (Math.abs(S.roll) > S.rollTol) { say.className = "say wait"; say.textContent = "Hold the phone straight (not leaning)"; }
+  else if (Math.abs(d) > S.tol) { S.inTol = 0; say.className = "say wait"; say.textContent = d > 0 ? `Turn RIGHT ${d.toFixed(0)}°` : `Turn LEFT ${(-d).toFixed(0)}°`; }
+  // inside the tolerance: first try to get within 0.8°; accept the tolerance only after 2 s of trying
+  else if (Math.abs(d) > 0.8 && (S.inTol = S.inTol || performance.now()) && performance.now() - S.inTol < 2000) {
+    say.className = "say wait"; say.textContent = d > 0 ? `A little more RIGHT ${d.toFixed(1)}°` : `A little more LEFT ${(-d).toFixed(1)}°`;
+  }
+  else if (!steady()) { say.className = "say wait"; say.textContent = "Hold still…"; }
+  else { S.inTol = 0; say.className = "say go"; say.textContent = "📸"; capture(tgt); }
+}
+
+function loop() { if (!$("hud").hidden) draw(); requestAnimationFrame(loop); }
+
+function beep() {
+  try {
+    const ac = S.audio; if (!ac) return;
+    const o = ac.createOscillator(), gn = ac.createGain();
+    o.frequency.value = 1180; gn.gain.value = 0.15; o.connect(gn); gn.connect(ac.destination);
+    o.start(); o.stop(ac.currentTime + 0.08);
+  } catch (_) {}
+}
+
+async function capture(tgt, manual = false) {
+  if (S.busy) return;
+  const v = $("video");
+  if (!v.videoWidth) return;
+  S.busy = true;
+  const meta = {
+    session: S.session, spot: S.spot, manual,
+    target_yaw: tgt ? tgt.t : null, target_tilt: tgt ? tgt.ring : null,
+    yaw: +rel().toFixed(2), tilt: +S.elev.toFixed(2), roll: +S.roll.toFixed(2),
+    euler: S.angles, step: S.step, w: v.videoWidth, h: v.videoHeight, time: new Date().toISOString(),
+  };
+  if (tgt) S.done.add(key(tgt.ring, tgt.t));
+  const cv = document.createElement("canvas");
+  cv.width = v.videoWidth; cv.height = v.videoHeight;
+  cv.getContext("2d").drawImage(v, 0, 0);
+  $("flash").style.opacity = "0.7"; setTimeout(() => ($("flash").style.opacity = "0"), 120);
+  beep();
+  const blob = await new Promise((res) => cv.toBlob(res, "image/jpeg", 0.93));
+  const name = tgt ? `spot${S.spot}_tilt${tgt.ring >= 0 ? "p" : "m"}${Math.abs(tgt.ring)}_yaw${String(tgt.t).padStart(3, "0")}`
+                   : `spot${S.spot}_manual_${Date.now()}`;
+  S.shots.push({ name, meta, tgt });
+  setTimeout(() => (S.busy = false), 500);
+  upload(name, meta, blob);
+}
+
+async function upload(name, meta, blob) {
+  S.pending++;
+  try {
+    const q = new URLSearchParams({ session: S.session, name, meta: JSON.stringify(meta) });
+    const r = await fetch(`/api/shot?${q}`, { method: "POST", body: blob, headers: { "Content-Type": "image/jpeg" } });
+    if (!r.ok) throw new Error(await r.text());
+    $("status").textContent = `Saved ${name}.jpg  (${meta.w}×${meta.h}, measured ${meta.yaw}°)`;
+  } catch (e) {
+    $("status").textContent = `Could not save ${name}: ${e.message}. Is the PC server running?`;
+  } finally { S.pending--; }
+}
+
+$("go").addEventListener("click", async () => {
+  $("err").textContent = "";
+  S.step = +$("step").value; S.rings = $("rings").value.split(",").map(Number); S.tol = +$("tol").value;
+  const nm = ($("name").value || "").trim().replace(/[^A-Za-z0-9_-]+/g, "_");
+  const ts = new Date(); const pad = (n) => String(n).padStart(2, "0");
+  S.session = `${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}_${pad(ts.getHours())}${pad(ts.getMinutes())}${nm ? "_" + nm : ""}`;
+  try {
+    if (!window.isSecureContext) throw new Error("This page must be opened with https:// (the server prints the address).");
+    if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+      const p = await DeviceOrientationEvent.requestPermission();
+      if (p !== "granted") throw new Error("Motion & Orientation access was refused. Close the tab, open the page again and tap Allow.");
+    }
+    window.addEventListener("deviceorientation", onOrient);
+    try { S.audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {}
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: false, video: { facingMode: { ideal: "environment" }, width: { ideal: 4032 }, height: { ideal: 3024 } },
+    });
+    const v = $("video"); v.srcObject = stream; await v.play();
+    try { await navigator.wakeLock.request("screen"); } catch (_) {}
+    $("start").hidden = true; $("hud").hidden = false; $("controls").hidden = false;
+    S.yaw0 = null; S.done.clear();
+  } catch (e) { $("err").textContent = String(e.message || e); }
+});
+$("zero").addEventListener("click", () => { S.yaw0 = S.yaw; S.done.clear(); });
+$("redo").addEventListener("click", () => {
+  const last = [...S.shots].reverse().find((s) => s.tgt && s.meta.spot === S.spot);
+  if (last) { S.done.delete(key(last.tgt.ring, last.tgt.t)); $("status").textContent = `Will retake ${last.name} (the old file is overwritten).`; }
+});
+$("shutter").addEventListener("click", () => capture(null, true));
+$("next").addEventListener("click", () => {
+  S.spot++; S.done.clear();
+  $("status").textContent = `Spot ${S.spot}: move about 1 m, face the same 0° direction (the dial keeps it), then turn right again.`;
+});
+$("finish").addEventListener("click", () => {
+  $("status").textContent = `Finished: ${S.shots.length} photos in data\\captures\\${S.session} on the PC. You can close this tab.`;
+  $("say").textContent = "Finished ✓"; $("say").className = "say go";
+  const v = $("video"); if (v.srcObject) v.srcObject.getTracks().forEach((t) => t.stop());
+  $("hud").hidden = true;
+});
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

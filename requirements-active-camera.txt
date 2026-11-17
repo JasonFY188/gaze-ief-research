@@ -1,0 +1,24 @@
+# Active camera (gaze footprint -> where to turn the camera) + final_form.py (no IEF).
+# 1) Install torch + torchvision for YOUR GPU first (https://pytorch.org/get-started/locally/), e.g.
+#      pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+# 2) pip install -r requirements-active-camera.txt
+# 3) pip install --no-deps "vggt @ git+https://github.com/facebookresearch/vggt@a288dd0f14786c93483e45524328726ab7b1b4ce"
+#      (--no-deps: VGGT pins an old torch; its real needs are listed below)
+# 4) pip install -e l2cs_net
+# Versions that worked on the lab PC (Windows, Python 3.13, torch 2.11 + CUDA 12.8, RTX 5090) are noted.
+numpy>=1.26            # 2.2.6
+scipy>=1.11            # 1.15.3
+pillow>=10             # 11.2.1
+opencv-python>=4.8     # 4.10 (headless also fine)
+matplotlib>=3.7        # 3.10.3
+pandas
+openpyxl               # 3.1.5
+einops                 # 0.8.2   (VGGT)
+huggingface_hub        # 2.4.0   (VGGT weights download)
+safetensors            # 0.8.0   (VGGT)
+plotly                 # 7.1.0   (view_3d.py, browser 3D view)
+# DeepGaze IIE: this 2023 commit does not need CLIP
+deepgaze_pytorch @ git+https://github.com/matthias-k/DeepGaze@874f12e1ee519860f49860638cf7f6375956d45a
+# RetinaFace face detector used by L2CS
+face-detection @ git+https://github.com/elliottzheng/face-detection@786fbab7095623c348e251f1f0a8b323721c6a84
+# Optional: Open3D window (view_open3d.py)  ->  pip install open3d   (0.20 used; on Windows also: pip install dash addict)

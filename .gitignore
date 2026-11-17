@@ -39,3 +39,13 @@ evaluation/
 .env
 CLAUDE.md
 
+
+# Turn Capture certificates (private keys): never commit
+turn_capture/certs/
+*.pem
+*.key
+*.cer
+*.csr
+*.srl
+# 3D exports of results
+*.ply

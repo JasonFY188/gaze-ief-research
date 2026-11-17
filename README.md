@@ -134,3 +134,11 @@ python final_form_ief.py
 **Next.** Let an active camera search only inside the predicted region to find the object the person is looking at.
 
 **Credits.** Built on L2CS-Net (Abdelrahman et al., MIT License). IEF: Carreira et al., "Human Pose Estimation with Iterative Error Feedback" (2016, arXiv:1507.06550). VGGT (Meta) and DeepGaze IIE (Kümmerer et al.) are used under their own licences.
+
+---
+
+## アクティブカメラ（ブランチ `active-camera-piper`）
+
+人の視線コーンが部屋の面に落ちる範囲（裾野）を求め、カメラの視野がそれを最も多く捉える向き（パン・チルト）を約30 msで計算します。
+PiPER アーム＋RealSense に載せて、「人が見ているもの」を見に行くロボットにする予定です。
+使い方と新しいPCのセットアップ：[`docs/ACTIVE_CAMERA.md`](docs/ACTIVE_CAMERA.md)、ロボットPCへの引き継ぎ：[`docs/HANDOFF_ROBOT_PC.md`](docs/HANDOFF_ROBOT_PC.md)
