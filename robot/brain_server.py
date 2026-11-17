@@ -111,7 +111,11 @@ def selftest(brain):
     hfov, vfov = math.degrees(2 * math.atan(w / 2 / fx)), math.degrees(2 * math.atan(h / 2 / fx))
     plan = brain.plan(paths, person, K, K, hfov, vfov)
     print("plan:", json.dumps(jsonable(plan), indent=1))
-    print("expected from the lab results: pan about -124, tilt about -10, captured about 94%")
+    # The best direction is a broad plateau: on the lab map -124/-10 sees 94% and -141/-16 sees 91%;
+    # on the brain's map -124/-10 sees 89% and -142/-16 sees 90%. So check the plateau, not one exact angle.
+    ok = -150 <= plan["pan_vggt"] <= -115 and plan["captured"] >= 0.85
+    print("lab results: pan -124 to -145, tilt -10 to -16, captured 90-94% (broad peak)")
+    print("SELFTEST PLAN:", "PASS" if ok else "FAIL - check gaze_brain.py")
     res, _ = brain.target(paths[4], K, out_dir=os.path.join(HERE, "outputs_robot", "selftest"))
     print("target:", res, "-> outputs_robot/selftest/target_overlay.jpg")
 
@@ -120,12 +124,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--warmup", default="1280x720",
+                    help="robot camera image size to warm the GPU up for (first call per size is 30-60 s); 'none' to skip")
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
     from robot.gaze_brain import Brain
     Handler.brain = Brain()
     if args.selftest:
         return selftest(Handler.brain)
+    if args.warmup != "none":
+        ww, hh = map(int, args.warmup.lower().split("x"))
+        Handler.brain.warmup(ww, hh)
     srv = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     print(f"brain server ready on port {args.port}. Give the laptop this PC's IPv4 address (ipconfig).", flush=True)
     try:

@@ -63,7 +63,9 @@ def load_vggt():
     missing = [k for k, _ in model.named_parameters() if k not in seen]
     if missing:
         raise RuntimeError(f"VGGT weights missing for {len(missing)} parameters, e.g. {missing[:3]}")
-    return model.eval()
+    # some buffers (e.g. aggregator._resnet_mean/_std) are made with torch.FloatTensor(...), which ignores the
+    # torch.device context and stays on the CPU; they are tiny, so moving the whole model costs nothing
+    return model.to(DEV).eval()
 
 
 def K_net(fx, fy, cx, cy, w, h, W, H):
@@ -86,6 +88,24 @@ class Brain:
         self.state = {}
         print(f"[brain] ready in {time.time() - t0:.0f} s", flush=True)
 
+    def warmup(self, w=1280, h=720, n_room=6):
+        """The FIRST call for each image size is slow (CUDA picks/compiles kernels): measured on the RTX 5090,
+        plan 33 s then 2.2 s, target 61 s then 1.8 s. Run every model once at the robot's image size so the
+        robot does not wait. Grey dummy images: no face is found, which is fine for warming up."""
+        t0 = time.time()
+        W, H = net_size(w, h)
+        grey = np.full((h, w, 3), 127, np.uint8)
+        self._vggt([grey] * (n_room + 1), W, H)          # plan: room photos + person photo
+        self._vggt([grey] * (n_room + 2), W, H)          # target: + the photo after turning
+        self.faces(grey)
+        with torch.inference_mode():
+            self.l2cs.model(torch.zeros(1, 3, 224, 224, device=DEV))
+            s = min(1.0, F.DEEPGAZE_MAX_DIM / max(h, w))
+            Hd, Wd = int(h * s), int(w * s)
+            self.dg(torch.zeros(1, 3, Hd, Wd, device=DEV).half(), torch.zeros(1, Hd, Wd, device=DEV).half())
+        torch.cuda.synchronize()
+        print(f"[brain] warmed up for {w}x{h} images in {time.time() - t0:.0f} s", flush=True)
+
     # ------------------------------------------------------------------ faces
     def faces(self, bgr, min_score=0.6):
         """[(x1, y1, x2, y2, score)] largest first; [] when nobody is visible."""
@@ -106,6 +126,7 @@ class Brain:
             yl, pl = self.l2cs.model(face_t)
         yp, pp = torch.softmax(yl, 1).cpu().numpy()[0], torch.softmax(pl, 1).cpu().numpy()[0]
         yaw, pitch = F.expected_angle_deg(yp, self.bins), F.expected_angle_deg(pp, self.bins)
+        np.random.seed(0)        # the cone half-angle is sampled (4000 draws): fixed seed -> same answer every run
         half = F.cone_half_angle_from_probs(yp, pp, self.bins, 4000, QUANTILE, F.CONE_MIN_DEG, F.CONE_MAX_DEG)
         return dict(bbox=bbox, yaw=float(yaw), pitch=float(pitch), half=float(half))
 
