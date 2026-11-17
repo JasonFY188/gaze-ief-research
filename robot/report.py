@@ -7,6 +7,7 @@ Writes into the run folder (outputs_robot/<date_time>/):
   fig4_before_after.png  what the camera saw before turning (person) and after (with the predicted target)
   summary.png          the four figures on one page
   view3d.html          interactive 3D: VGGT room, footprint, gaze cone, robot camera before/after, all photo cameras
+  view3d_target.html   interactive 3D of the gaze RESULT: turned photo coloured by the heat map, eye, cone, target point
 and appends one line to outputs_robot/runs.csv.
 
   python robot/report.py outputs_robot/<run>                     # run saved with viz.npz
@@ -59,6 +60,9 @@ def replan(run, brain_ip):
     print(f"[report] replanned: turn pan {p['turn_pan']:+.1f} tilt {p['turn_tilt']:+.1f} "
           f"(saved run: {r['turn_pan']:+.1f} {r['turn_tilt']:+.1f}); captured {p['captured']:.1%} (saved {r['captured']:.1%})")
     np.savez_compressed(os.path.join(run, "viz.npz"), **{k: np.asarray(v) for k, v in p["viz"].items() if v is not None})
+    t, _ = b.target(os.path.join(run, "target.jpg"), K, viz=True)          # the gaze result in 3D, same photos
+    print(f"[report] target again: peak pixel {t['peak_px']} (saved run: {r['target']['peak_px']})")
+    np.savez_compressed(os.path.join(run, "viz_target.npz"), **{k: np.asarray(v) for k, v in t["viz"].items()})
 
 
 def basis(up, ref):
@@ -173,6 +177,52 @@ def view3d(run, r, V):
     fig.write_html(os.path.join(run, "view3d.html"), include_plotlyjs=True, full_html=True)
 
 
+def view3d_target(run, r):
+    """3D of the gaze RESULT: room + the photo after turning coloured by the fused heat map, eye, gaze cone, and the
+    predicted target as a 3D point (all from the VGGT run of the target step)."""
+    import plotly.graph_objects as go
+    from view_3d import lines_trace
+    p = os.path.join(run, "viz_target.npz")
+    if not os.path.exists(p):
+        return False
+    z = np.load(p)
+    PT, hT, rgbT, PR, rgbR = z["PT"], z["heatT"], z["rgbT"] / 255.0, z["PR"], z["rgbR"] / 255.0
+    eye, gaze, half, up, pk = z["eye"], z["gaze"], float(z["half"]), z["up"], z["peak3d"]
+    L = float(np.percentile(np.linalg.norm(np.concatenate([PR, PT]) - eye, axis=1), 90))
+    jet = plt.get_cmap("jet")
+    a = np.clip(hT, 0, 1)[:, None] ** 0.7
+    colT = (1 - 0.8 * a) * rgbT + 0.8 * a * jet(np.clip(hT, 0, 1))[:, :3]
+    cs = lambda c: [f"rgb({int(255 * x)},{int(255 * y)},{int(255 * q)})" for x, y, q in np.clip(c, 0, 1)]  # noqa: E731
+    tr = [go.Scatter3d(x=PR[:, 0], y=PR[:, 1], z=PR[:, 2], mode="markers", name="room (iPhone map, this VGGT run)",
+                       marker=dict(size=1.5, color=cs(rgbR), opacity=0.5), hoverinfo="skip"),
+          go.Scatter3d(x=PT[:, 0], y=PT[:, 1], z=PT[:, 2], mode="markers",
+                       name="photo after turning, coloured by gaze heat (cone x DeepGaze)",
+                       marker=dict(size=2.2, color=cs(colT)), hoverinfo="skip"),
+          go.Scatter3d(x=[eye[0]], y=[eye[1]], z=[eye[2]], mode="markers+text", text=["eye"], name="eye",
+                       marker=dict(size=7, color="black")),
+          lines_trace([(eye, eye + 1.1 * L * gaze)], "gaze ray", "red", 7)]
+    u = np.cross(gaze, up); u /= np.linalg.norm(u); v = np.cross(u, gaze)
+    h = np.radians(half)
+    tr.append(lines_trace([(eye, eye + 1.1 * L * (np.cos(h) * gaze + np.sin(h) * (np.cos(t) * u + np.sin(t) * v)))
+                           for t in np.radians(np.arange(0, 360, 30))], f"gaze cone ±{half:.0f}°", "rgba(255,0,0,0.45)", 2,
+                          "dash"))
+    tr.append(go.Scatter3d(x=[pk[0]], y=[pk[1]], z=[pk[2]], mode="markers+text", text=["predicted target"],
+                           name="predicted gaze target (green cross)", marker=dict(size=10, color="lime", symbol="diamond")))
+    tr.append(lines_trace([(eye, pk)], "eye -> predicted target", "lime", 4, "dot"))
+    for c, f, lab, col in ((z["cam_person"], z["fwd_person"], "robot camera: person photo", "blue"),
+                           (z["cam_target"], z["fwd_target"], "robot camera: after turning", "green")):
+        tr.append(lines_trace([(c, c + 0.3 * L * f)], lab, col, 6))
+    ang = np.degrees(np.arccos(np.clip(((pk - eye) / np.linalg.norm(pk - eye)) @ gaze, -1, 1)))
+    fig = go.Figure(tr)
+    fig.update_layout(title=f"{os.path.basename(run)}: gaze result in 3D. Predicted target is {ang:.0f}° from the "
+                            f"gaze ray (cone ±{half:.0f}°)" + (f"; person looked at: {r['looked_at']}" if r.get("looked_at") else ""),
+                      scene=dict(aspectmode="data", xaxis=dict(visible=False), yaxis=dict(visible=False),
+                                 zaxis=dict(visible=False), camera=dict(up=dict(x=float(up[0]), y=float(up[1]), z=float(up[2])))),
+                      legend=dict(itemsizing="constant", bgcolor="rgba(255,255,255,0.8)"), margin=dict(l=0, r=0, t=40, b=0))
+    fig.write_html(os.path.join(run, "view3d_target.html"), include_plotlyjs=True, full_html=True)
+    return True
+
+
 def append_csv(run, r, note):
     row = dict(run=os.path.basename(run), yaw=round(r["yaw"], 1), pitch=round(r["pitch"], 1),
                cone_half=round(r["cone_half"], 1), robot_pan_at_person=round(r["person_robot_pan"], 1),
@@ -213,8 +263,9 @@ def make(run, note=None):
                 + (f"   (person looked at: {note})" if note else ""), fontsize=16)
     fg.tight_layout(); fg.savefig(os.path.join(run, "summary.png"), dpi=90); plt.close(fg)
     view3d(run, r, V)
+    t3d = view3d_target(run, r)
     append_csv(run, r, note)
-    print(f"[report] {run}: fig1-4, summary.png, view3d.html; row in {RUNS_CSV}")
+    print(f"[report] {run}: fig1-4, summary.png, view3d.html{', view3d_target.html' if t3d else ''}; row in {RUNS_CSV}")
 
 
 def main():

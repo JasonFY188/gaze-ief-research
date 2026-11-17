@@ -149,7 +149,7 @@ def countdown_photo(cam, delay):
     while True:
         img = cam.read()
         cv2.imshow("robot", overlay(img.copy(), ["facing you.  Press SPACE, then look at something",
-                                                 f"(photo after {delay:.0f} s)   ESC = quit"]))
+                                                 f"(photo after {delay:g} s)   ESC = quit"]))
         k = cv2.waitKey(1)
         if k == 27:
             return None
@@ -241,7 +241,10 @@ def run(args):
         time.sleep(1.0)
         shot = cam.read()
         cv2.imwrite(os.path.join(out, "target.jpg"), shot)
-        tgt, over = brain.target(shot, K, out_dir=out)
+        tgt, over = brain.target(shot, K, out_dir=out, viz=bool(args.map))
+        vt = tgt.pop("viz", None)                       # 3D of the gaze result, for view3d_target.html
+        if vt:
+            np.savez_compressed(os.path.join(out, "viz_target.npz"), **{k: np.asarray(x) for k, x in vt.items()})
         plan.update(target=tgt)
         json.dump(plan, open(os.path.join(out, "result.json"), "w"), indent=1, default=float)
         print(f"[run] predicted gaze target at pixel {tgt['peak_px']} -> {out}")
@@ -333,7 +336,7 @@ def main():
     sub = ap.add_subparsers(dest="mode", required=True)
     s = sub.add_parser("scan")
     r = sub.add_parser("run")
-    r.add_argument("--room"); r.add_argument("--rescan", action="store_true"); r.add_argument("--delay", type=float, default=5.0)
+    r.add_argument("--room"); r.add_argument("--rescan", action="store_true"); r.add_argument("--delay", type=float, default=0.5)
     r.add_argument("--brain", help="IP of the GPU PC running robot/brain_server.py (default: run the models here)")
     r.add_argument("--map", help="saved room map instead of a robot scan, e.g. data/captures/20261116_1857_Room_60_degree")
     r.add_argument("--map-fov-short", type=float, default=55.9, help="measured short-side FOV of the map photos (deg)")

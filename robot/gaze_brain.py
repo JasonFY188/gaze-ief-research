@@ -342,7 +342,7 @@ class Brain:
                    eye_to_robot_cam=float(np.linalg.norm(eye - cam)),
                    used_anchor=iA is not None, arm=arm, used_center_fn=center_fn is not None,
                    secs_vggt=round(t_vggt, 2), secs_total=round(time.time() - t0, 2), net_size=(SQ, SQ))
-        self.state = dict(mode="map", rgbs=rgbs, Ks=Ks, gaze=g, nR=nR, iP=iP, plan=res)
+        self.state = dict(mode="map", rgbs=rgbs, Ks=Ks, gaze=g, nR=nR, iP=iP, plan=res, masks=masks)
         if viz:                       # everything robot/report.py needs to draw the presentation figures
             rng = np.random.default_rng(0)
             sub = rng.choice(len(P), min(40000, len(P)), replace=False)
@@ -356,8 +356,10 @@ class Brain:
         return res
 
     # ------------------------------------------------------------------ step B: where is the person looking
-    def target(self, photo, K_target, out_dir=None):
-        """photo taken after turning -> fused heat map (gaze cone x DeepGaze IIE), peak pixel, overlay image."""
+    def target(self, photo, K_target, out_dir=None, viz=False):
+        """photo taken after turning -> fused heat map (gaze cone x DeepGaze IIE), peak pixel, overlay image.
+        viz=True also returns the 3D view of this step (room + the turned photo coloured by the heat map, eye, gaze,
+        the predicted target as a 3D point); all in this VGGT run's own frame."""
         st = self.state
         t0 = time.time()
         rgbT = load_rgb(photo)
@@ -373,6 +375,10 @@ class Brain:
             theta_net = F.theta_map_from_eye_and_worldpoints(v["wp"][iT], v["extr"][iT], eye, dir_cam)
             S0 = sqT.shape[0]
             theta_full = cv2.resize(theta_net, (S0, S0), interpolation=cv2.INTER_LINEAR)[oy:oy + H0, ox:ox + W0]
+            Wn = Hn = SQ
+            to_orig = lambda u, vv: (u * S0 / SQ - ox, vv * S0 / SQ - oy)          # noqa: E731  net px -> photo px
+            to_net = lambda x, y: ((x + ox) * SQ / S0, (y + oy) * SQ / S0)         # noqa: E731
+            room_masks = st.get("masks")
         else:
             rgbs = st["rgbs"] + [rgbT]
             h0, w0 = rgbs[0].shape[:2]
@@ -384,6 +390,10 @@ class Brain:
             dir_cam = F.gaze_dir_cam_from_dir_world(gaze, v["extr"][iT])
             theta_net = F.theta_map_from_eye_and_worldpoints(v["wp"][iT], v["extr"][iT], eye, dir_cam)
             theta_full = cv2.resize(theta_net, (W0, H0), interpolation=cv2.INTER_LINEAR)
+            Wn, Hn = W, H
+            to_orig = lambda u, vv: (u * W0 / W, vv * H0 / H)                      # noqa: E731
+            to_net = lambda x, y: (x * W / W0, y * H / H0)                         # noqa: E731
+            room_masks = None
         half = st["gaze"]["half"]
         sigma = F.sigma_from_cone_quantile(np.deg2rad(half), F.CONE_QUANTILE)
         # DeepGaze on the cone-conditioned photo (as final_form.py: outside the cone darkened)
@@ -414,6 +424,33 @@ class Brain:
         cv2.drawMarker(over, peak, (0, 255, 0), cv2.MARKER_CROSS, 60, 4)
         cv2.putText(over, "predicted gaze target", (peak[0] + 20, peak[1] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
         res = dict(peak_px=peak, cone_share_of_photo=cone_share, secs=round(time.time() - t0, 2))
+        if viz:
+            wpT, s = v["wp"][iT], 2
+            vv, uu = np.mgrid[0:Hn:s, 0:Wn:s]
+            xo, yo = to_orig(uu + 0.5, vv + 0.5)
+            ok = (xo >= 0) & (xo < W0) & (yo >= 0) & (yo < H0) & np.isfinite(wpT[::s, ::s]).all(-1)
+            xi, yi = np.clip(xo[ok].astype(int), 0, W0 - 1), np.clip(yo[ok].astype(int), 0, H0 - 1)
+            pu, pv = to_net(peak[0], peak[1])
+            peak3d = wpT[int(np.clip(pv, 0, Hn - 1)), int(np.clip(pu, 0, Wn - 1))]
+            # room from the map photos of this same VGGT run (for context)
+            nR, Pr, Cr = st["nR"], [], []
+            for k in range(nR):
+                pk, ck = v["wp"][k, ::4, ::4].reshape(-1, 3), v["wconf"][k, ::4, ::4].reshape(-1)
+                good = np.isfinite(pk).all(1)
+                if room_masks is not None:
+                    good &= room_masks[k][::4, ::4].reshape(-1)
+                good &= ck >= np.quantile(ck[good], 1 - CONF_KEEP)
+                Pr.append(pk[good]); Cr.append(v["ims"][k].permute(1, 2, 0).numpy()[::4, ::4].reshape(-1, 3)[good])
+            extr = v["extr"]
+            fwd = np.stack([e[2, :3] for e in extr])
+            _, _, vt = np.linalg.svd(fwd[:nR])
+            up = vt[2] if vt[2] @ (-extr[0][1, :3]) > 0 else -vt[2]
+            centers = np.stack([-e[:3, :3].T @ e[:3, 3] for e in extr])
+            res["viz"] = dict(PT=wpT[::s, ::s][ok].round(4), heatT=heat[yi, xi].round(4), rgbT=rgbT[yi, xi],
+                              PR=np.concatenate(Pr).round(4), rgbR=(np.concatenate(Cr) * 255).astype(np.uint8),
+                              eye=eye, gaze=gaze, half=half, up=up, peak3d=peak3d,
+                              cam_person=centers[iP], fwd_person=fwd[iP], cam_target=centers[iT], fwd_target=fwd[iT],
+                              R_target=extr[iT][:3, :3])
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
             cv2.imwrite(os.path.join(out_dir, "target_overlay.jpg"), over)

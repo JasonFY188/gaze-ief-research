@@ -69,8 +69,10 @@ class RemoteBrain:
             out["viz"] = {k: (np.asarray(v) if isinstance(v, list) else v) for k, v in out["viz"].items()}
         return out
 
-    def target(self, photo, K, out_dir=None):
-        out = self._post("/target", {"image": enc(imread(photo)), "K": np.asarray(K).tolist()})
+    def target(self, photo, K, out_dir=None, viz=False):
+        out = self._post("/target", {"image": enc(imread(photo)), "K": np.asarray(K).tolist(), "viz": viz})
+        if out["result"].get("viz"):
+            out["result"]["viz"] = {k: np.asarray(v) for k, v in out["result"]["viz"].items()}
         over = cv2.imdecode(np.frombuffer(base64.b64decode(out["overlay"]), np.uint8), cv2.IMREAD_COLOR)
         if out_dir:
             import os

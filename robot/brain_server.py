@@ -97,7 +97,7 @@ class Handler(BaseHTTPRequestHandler):
                                      K_anchor=None if anchor is None else np.array(req["K_anchor"]),
                                      arm=req.get("arm"), viz=bool(req.get("viz")))
                 elif self.path == "/target":
-                    res, over = b.target(dec(req["image"]), np.array(req["K"]))
+                    res, over = b.target(dec(req["image"]), np.array(req["K"]), viz=bool(req.get("viz")))
                     out = {"result": res, "overlay": enc(over)}
                 else:
                     return self._send(404, {"ok": False, "error": "unknown path"})
