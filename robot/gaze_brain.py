@@ -130,13 +130,17 @@ class Brain:
         print(f"[brain] warmed up for {w}x{h} images in {time.time() - t0:.0f} s", flush=True)
 
     # ------------------------------------------------------------------ faces
-    def faces(self, bgr, min_score=0.6):
-        """[(x1, y1, x2, y2, score)] largest first; [] when nobody is visible."""
+    def faces(self, bgr, min_score=0.9):
+        """[(x1, y1, x2, y2, score)] most confident first; [] when nobody is visible.
+        First robot run (2026-11-17): RetinaFace saw the door as a face (score 0.64, box 77% of the image) while
+        the real face scored 1.00; with min_score 0.6 and 'largest first' the door was used as the person.
+        So: score >= 0.9, boxes taller than half the image dropped, most confident first."""
+        H = bgr.shape[0]
         out = []
         for box, _lm, score in (self.l2cs.detector(bgr) or []):
-            if score >= min_score:
+            if score >= min_score and (box[3] - box[1]) <= 0.5 * H:
                 out.append((*map(float, box[:4]), float(score)))
-        return sorted(out, key=lambda b: -(b[2] - b[0]) * (b[3] - b[1]))
+        return sorted(out, key=lambda b: (-round(b[4], 2), -(b[2] - b[0]) * (b[3] - b[1])))
 
     def gaze(self, bgr):
         """L2CS on the largest face: bbox, yaw, pitch, 95% cone half-angle, bin probabilities."""
