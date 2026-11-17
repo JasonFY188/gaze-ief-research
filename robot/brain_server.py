@@ -83,6 +83,19 @@ class Handler(BaseHTTPRequestHandler):
                     out = b.plan([dec(x) for x in req["room"]], dec(req["person"]),
                                  np.array(req["K_room"]), np.array(req["K_person"]), req["hfov"], req["vfov"],
                                  room_pans=req.get("room_pans"), pan_limits=req.get("pan_limits"))
+                elif self.path == "/plan_map":
+                    # room photos + anchor are read from THIS PC's disk (paths relative to the repo; both PCs have
+                    # the same data/ folder), only the robot's person photo travels
+                    import glob as _g
+                    room = sorted(_g.glob(os.path.join(HERE, req["room_dir"], "*.jpg")))
+                    if not room:
+                        raise FileNotFoundError(f"no photos in {req['room_dir']} on the brain PC")
+                    anchor = os.path.join(HERE, req["anchor"]) if req.get("anchor") else None
+                    out = b.plan_map(room, np.array(req["K_room"]), dec(req["person"]), np.array(req["K_person"]),
+                                     req["hfov"], req["vfov"], pan0=req.get("pan0", 0.0), tilt0=req.get("tilt0", 0.0),
+                                     pan_limits=req.get("pan_limits"), anchor=anchor,
+                                     K_anchor=None if anchor is None else np.array(req["K_anchor"]),
+                                     arm=req.get("arm"))
                 elif self.path == "/target":
                     res, over = b.target(dec(req["image"]), np.array(req["K"]))
                     out = {"result": res, "overlay": enc(over)}
@@ -123,10 +136,37 @@ def selftest(brain):
     print("target:", res, "-> outputs_robot/selftest/target_overlay.jpg")
 
 
+def selftest_map(brain):
+    """Saved-map mode: iPhone circle as the map, the iPhone person photo as BOTH the anchor and the 'robot photo'.
+    The best view must be the same place as in selftest() (broad optimum, about 85-94% of the footprint)."""
+    import glob
+    import math
+    from PIL import Image, ImageOps
+    room = os.path.join(HERE, "data", "captures", "20261116_1857_Room_60_degree")
+    person = os.path.join(HERE, "data", "scenes", "Person1", "scenario_1_2m", "testing_1scenario_2m", "person_01.jpg")
+    paths = sorted(glob.glob(os.path.join(room, "*.jpg")))
+    w, h = ImageOps.exif_transpose(Image.open(paths[0])).size
+    fx = (min(w, h) / 2) / math.tan(math.radians(55.9 / 2))
+    K = np.array([[fx, 0, w / 2], [0, fx, h / 2], [0, 0, 1.0]])
+    pim = Image.open(person)
+    pw, ph = ImageOps.exif_transpose(pim).size
+    fp = float(pim.getexif().get_ifd(0x8769).get(0xA405)) * math.hypot(pw, ph) / math.hypot(36, 24)
+    Kp = np.array([[fp, 0, pw / 2], [0, fp, ph / 2], [0, 0, 1.0]])
+    hfov, vfov = math.degrees(2 * math.atan(w / 2 / fx)), math.degrees(2 * math.atan(h / 2 / fx))
+    plan = brain.plan_map(paths, K, person, Kp, hfov, vfov, anchor=person, K_anchor=Kp)
+    print("plan_map:", json.dumps(jsonable(plan), indent=1))
+    ok = plan["captured"] >= 0.80 and plan["robot_cam_vggt_to_anchor"] < 0.05 * plan["map_size"]
+    print("SELFTEST PLAN_MAP:", "PASS" if ok else "FAIL - check gaze_brain.plan_map",
+          "(captured >= 80%, person photo and anchor at the same spot)")
+    res, _ = brain.target(paths[4], K, out_dir=os.path.join(HERE, "outputs_robot", "selftest_map"))
+    print("target:", res, "-> outputs_robot/selftest_map/target_overlay.jpg")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--selftest-map", action="store_true", help="test the saved-room-map mode (plan_map) without a robot")
     ap.add_argument("--warmup", default="1280x720",
                     help="robot camera image size to warm the GPU up for (first call per size is 30-60 s); 'none' to skip")
     args = ap.parse_args()
@@ -135,6 +175,8 @@ def main():
     Handler.brain = Brain()
     if args.selftest:
         return selftest(Handler.brain)
+    if args.selftest_map:
+        return selftest_map(Handler.brain)
     if args.warmup != "none":
         ww, hh = map(int, args.warmup.lower().split("x"))
         Handler.brain.warmup(ww, hh)

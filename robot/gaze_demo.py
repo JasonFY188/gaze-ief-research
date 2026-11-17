@@ -2,9 +2,13 @@
 
 Run from the repo root with the gazecam env (Windows). The arm server must run in WSL for `scan` and `run`.
 
+  python robot/gaze_demo.py face --brain <GPU PC IP>   # test: only find the person and turn to face them
   python robot/gaze_demo.py scan                       # robot makes its own 6-photo room map (60 deg steps)
   python robot/gaze_demo.py run --brain <GPU PC IP> [--room DIR] [--delay 5]   # models on the lab PC
   python robot/gaze_demo.py run [--room DIR] [--delay 5]                       # models on this PC
+  python robot/gaze_demo.py run --brain <IP> --map data/captures/20261116_1857_Room_60_degree \
+         --anchor data/scenes/Person1/scenario_1_2m/testing_1scenario_2m/person_01.jpg
+         # saved iPhone room map, no robot scan; the robot camera is assumed to be where the anchor photo was taken
   python robot/gaze_demo.py offline --room data/captures/20261116_1857_Room_60_degree \
          --person data/scenes/Person1/scenario_1_2m/testing_1scenario_2m/person_01.jpg --fov-short 55.9
          # no robot: tests the brain on saved iPhone photos (the 'turned' photo = closest room photo)
@@ -40,8 +44,31 @@ def K_of(intr):
 
 
 def latest_robot_room():
-    rooms = sorted(glob.glob(os.path.join(HERE, "data", "captures", "robot_*")))
-    return rooms[-1] if rooms else None
+    """Newest robot room scan that is complete (6 photos listed in poses.jsonl); half-finished scans are skipped."""
+    for d in sorted(glob.glob(os.path.join(HERE, "data", "captures", "robot_*")), reverse=True):
+        pj = os.path.join(d, "poses.jsonl")
+        if os.path.exists(pj) and sum(1 for line in open(pj, encoding="utf-8") if line.strip()) == len(ROOM_PANS):
+            return d
+    return None
+
+
+def phone_K(path, fov_short=None):
+    """Intrinsics (original pixels) of a phone photo: measured short-side FOV if given, else EXIF 35 mm focal."""
+    from PIL import Image, ImageOps
+    im = Image.open(path)
+    w, h = ImageOps.exif_transpose(im).size
+    if fov_short is not None:
+        f = (min(w, h) / 2) / math.tan(math.radians(fov_short / 2))
+    else:
+        f35 = im.getexif().get_ifd(0x8769).get(0xA405)
+        if not f35:
+            raise ValueError(f"{path}: no EXIF focal length; pass a measured FOV")
+        f = float(f35) * math.hypot(w, h) / math.hypot(36, 24)
+    return np.array([[f, 0, w / 2], [0, f, h / 2], [0, 0, 1.0]])
+
+
+def rel(p):
+    return os.path.relpath(os.path.abspath(p), HERE).replace("\\", "/")
 
 
 def read_room(room_dir):
@@ -82,7 +109,7 @@ def find_and_face(arm, cam, brain, pan=0.0, tilt=0.0):
     """Turn until the largest face is in the middle of the image. Returns the (pan, tilt) that faces the person."""
     intr = cam.intr
     search = [0, -40, 40, -80, 80, -120, 120]
-    si, lost = 0, 0
+    si, lost, prev = 0, 0, None
     for _ in range(40):
         img = cam.read()
         fs = brain.faces(img)
@@ -90,7 +117,7 @@ def find_and_face(arm, cam, brain, pan=0.0, tilt=0.0):
             lost += 1
             cv2.imshow("robot", overlay(img, ["looking for a person ..."])); cv2.waitKey(1)
             if lost >= 3:                                    # nobody here: try the next search direction
-                si = (si + 1) % len(search); pan, tilt, lost = float(search[si]), 0.0, 0
+                si = (si + 1) % len(search); pan, tilt, lost, prev = float(search[si]), 0.0, 0, None
                 arm.pantilt(pan, tilt, speed=15)
             continue
         lost = 0
@@ -102,7 +129,16 @@ def find_and_face(arm, cam, brain, pan=0.0, tilt=0.0):
         cv2.imshow("robot", overlay(img, [f"person found, centring ({dpan:+.0f}, {dtilt:+.0f} deg)"])); cv2.waitKey(1)
         if abs(dpan) < 3 and abs(dtilt) < 3:
             return pan, tilt
-        pan = float(np.clip(pan + dpan, *PAN_LIMITS)); tilt = float(np.clip(tilt + dtilt, -40, 40))
+        # safety: after a correction the face must get closer to the centre; if it moved further away,
+        # that axis is wired the wrong way round -> stop instead of turning away from the person
+        if prev is not None:
+            for name, now, before, step in (("pan", dpan, prev[0], prev[2]), ("tilt", dtilt, prev[1], prev[3])):
+                if abs(step) >= 3 and abs(now) > abs(before) + 2 and np.sign(now) == np.sign(before):
+                    raise RuntimeError(f"{name} turns the wrong way: the face moved further from the centre "
+                                       f"({before:+.0f} -> {now:+.0f} deg). Flip {name.upper()}_SIGN in robot/arm_server.py.")
+        step_p, step_t = float(np.clip(dpan, -20, 20)), float(np.clip(dtilt, -20, 20))   # gentle steps
+        prev = (dpan, dtilt, step_p, step_t)
+        pan = float(np.clip(pan + step_p, *PAN_LIMITS)); tilt = float(np.clip(tilt + step_t, -40, 40))
         arm.pantilt(pan, tilt, speed=15)
         time.sleep(0.3)
     raise RuntimeError("could not centre on a face")
@@ -133,19 +169,32 @@ def countdown_photo(cam, delay):
 def run(args):
     from robot.arm_client import Arm
     from robot.realsense_cam import RealSense
-    arm, cam = Arm(), RealSense()
+    arm = Arm()
+    if arm.status()["home"] is None:
+        sys.exit("No home pose yet: run robot/jog.py, aim the camera level and straight ahead, press Shift+H.")
+    cam = RealSense()
     if args.brain:                                   # heavy models on the GPU PC (robot/brain_server.py)
         from robot.brain_client import RemoteBrain
         brain = RemoteBrain(args.brain)
     else:
         from robot.gaze_brain import Brain
         brain = Brain()
-    room = args.room or latest_robot_room()
-    if room is None or args.rescan:
-        room = scan(arm, cam)
-    room_paths, room_pans, _ = read_room(room)
-    print(f"[run] room map: {room} ({len(room_paths)} photos)")
     K = K_of(cam.intr)
+    if args.map:                                     # saved room map (e.g. iPhone circle): no robot scan
+        from robot.piper_fk import camera as fk_camera
+        map_dir = rel(args.map)
+        map_photos = sorted(glob.glob(os.path.join(HERE, map_dir, "*.jpg")))
+        K_map = phone_K(map_photos[0], args.map_fov_short)
+        anchor = rel(args.anchor) if args.anchor else None
+        K_anchor = phone_K(os.path.join(HERE, anchor)) if anchor else None
+        print(f"[run] saved room map {map_dir} ({len(map_photos)} photos, short-side FOV {args.map_fov_short})"
+              f"{'; robot camera position = where ' + anchor + ' was taken' if anchor else ''}")
+    else:
+        room = args.room or latest_robot_room()
+        if room is None or args.rescan:
+            room = scan(arm, cam)
+        room_paths, room_pans, _ = read_room(room)
+        print(f"[run] room map: {room} ({len(room_paths)} photos)")
     arm.home()
     while True:
         pan0, tilt0 = find_and_face(arm, cam, brain)
@@ -155,13 +204,32 @@ def run(args):
         out = os.path.join(OUT_ROOT, stamp())
         os.makedirs(out, exist_ok=True)
         cv2.imwrite(os.path.join(out, "person.jpg"), person)
-        plan = brain.plan(room_paths, person, K, K, cam.hfov, cam.vfov, room_pans=room_pans, pan_limits=PAN_LIMITS)
-        plan.update(person_robot_pan=pan0, person_robot_tilt=tilt0, room=room)
-        print(f"[run] gaze yaw {plan['yaw']:+.0f} pitch {plan['pitch']:+.0f} cone ±{plan['cone_half']:.0f}  ->  turn to "
-              f"pan {plan['robot_pan']:+.0f} tilt {plan['robot_tilt']:+.0f} (sees {plan['captured']:.0%} of the footprint; "
-              f"{plan['secs_total']} s)")
-        print(f"[run] check: VGGT vs robot angle of the room photos (deg): "
-              f"{[round(x, 1) for x in plan['room_pan_residual_deg']]}")
+        if args.map:
+            fk = fk_camera(arm.status()["joints"])
+            arm_info = {"radius_m": fk["radius"], "height_m": fk["height"], "cam_elevation_deg": fk["elevation_deg"]}
+            if isinstance(brain, __import__("robot.brain_client", fromlist=["RemoteBrain"]).RemoteBrain):
+                plan = brain.plan_map(map_dir, K_map, person, K, cam.hfov, cam.vfov, pan0=pan0, tilt0=tilt0,
+                                      pan_limits=PAN_LIMITS, anchor=anchor, K_anchor=K_anchor, arm=arm_info)
+            else:
+                plan = brain.plan_map(map_photos, K_map, person, K, cam.hfov, cam.vfov, pan0=pan0, tilt0=tilt0,
+                                      pan_limits=PAN_LIMITS, anchor=os.path.join(HERE, anchor) if anchor else None,
+                                      K_anchor=K_anchor, arm=arm_info)
+            plan.update(person_robot_pan=pan0, person_robot_tilt=tilt0, map=map_dir, anchor=anchor)
+            print(f"[run] gaze yaw {plan['yaw']:+.0f} pitch {plan['pitch']:+.0f} cone ±{plan['cone_half']:.0f}  ->  turn by "
+                  f"pan {plan['turn_pan']:+.0f} tilt {plan['turn_tilt']:+.0f} = robot pan {plan['robot_pan']:+.0f} tilt "
+                  f"{plan['robot_tilt']:+.0f}; sees {plan['captured']:.0%} of the footprint "
+                  f"(now {plan['captured_without_turning']:.0%}); {plan['secs_total']} s")
+            if plan.get("robot_cam_vggt_to_anchor") is not None:
+                print(f"[run] check: robot camera (VGGT) is {plan['robot_cam_vggt_to_anchor']:.2f} VGGT units from the "
+                      f"anchor spot (eye-camera distance {plan['eye_to_robot_cam']:.2f} units)")
+        else:
+            plan = brain.plan(room_paths, person, K, K, cam.hfov, cam.vfov, room_pans=room_pans, pan_limits=PAN_LIMITS)
+            plan.update(person_robot_pan=pan0, person_robot_tilt=tilt0, room=room)
+            print(f"[run] gaze yaw {plan['yaw']:+.0f} pitch {plan['pitch']:+.0f} cone ±{plan['cone_half']:.0f}  ->  turn to "
+                  f"pan {plan['robot_pan']:+.0f} tilt {plan['robot_tilt']:+.0f} (sees {plan['captured']:.0%} of the footprint; "
+                  f"{plan['secs_total']} s)")
+            print(f"[run] check: VGGT vs robot angle of the room photos (deg): "
+                  f"{[round(x, 1) for x in plan['room_pan_residual_deg']]}")
         arm.pantilt(plan["robot_pan"], plan["robot_tilt"], speed=15)
         time.sleep(1.0)
         shot = cam.read()
@@ -175,6 +243,39 @@ def run(args):
             break
         arm.home()
     cam.stop(); cv2.destroyAllWindows()
+
+
+def face(args):
+    """Only: find the person and turn to face them (no room scan, no gaze). For testing the arm + brain link."""
+    from robot.arm_client import Arm
+    from robot.realsense_cam import RealSense
+    arm, cam = Arm(), RealSense()
+    if args.brain:
+        from robot.brain_client import RemoteBrain
+        brain = RemoteBrain(args.brain)
+    else:
+        from robot.gaze_brain import Brain
+        brain = Brain()
+    if arm.status()["home"] is None:
+        sys.exit("No home pose yet: run robot/jog.py, aim the camera level and straight ahead, press Shift+H.")
+    arm.home()
+    try:
+        while True:
+            pan, tilt = find_and_face(arm, cam, brain)
+            print(f"[face] facing you at pan {pan:+.1f}, tilt {tilt:+.1f}")
+            while True:                                           # keep showing the view until a key is pressed
+                img = cam.read()
+                for x1, y1, x2, y2, _ in brain.faces(img)[:1]:
+                    cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 3)
+                cv2.imshow("robot", overlay(img, [f"facing you (pan {pan:+.0f}, tilt {tilt:+.0f})",
+                                                  "SPACE = find again, ESC = quit"]))
+                k = cv2.waitKey(1)
+                if k in (27, 32):
+                    break
+            if k == 27:
+                break
+    finally:
+        cam.stop(); cv2.destroyAllWindows()
 
 
 def offline(args):
@@ -218,6 +319,11 @@ def main():
     r = sub.add_parser("run")
     r.add_argument("--room"); r.add_argument("--rescan", action="store_true"); r.add_argument("--delay", type=float, default=5.0)
     r.add_argument("--brain", help="IP of the GPU PC running robot/brain_server.py (default: run the models here)")
+    r.add_argument("--map", help="saved room map instead of a robot scan, e.g. data/captures/20261116_1857_Room_60_degree")
+    r.add_argument("--map-fov-short", type=float, default=55.9, help="measured short-side FOV of the map photos (deg)")
+    r.add_argument("--anchor", help="earlier photo taken from where the robot camera is now (e.g. the iPhone person photo)")
+    fc = sub.add_parser("face")
+    fc.add_argument("--brain", help="IP of the GPU PC running robot/brain_server.py")
     o = sub.add_parser("offline")
     o.add_argument("--room", required=True); o.add_argument("--person", required=True)
     o.add_argument("--fov-short", type=float, default=55.9)
@@ -226,6 +332,8 @@ def main():
         offline(args)
     elif args.mode == "run":
         run(args)
+    elif args.mode == "face":
+        face(args)
     else:
         from robot.arm_client import Arm
         from robot.realsense_cam import RealSense

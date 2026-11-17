@@ -73,6 +73,26 @@ def K_net(fx, fy, cx, cy, w, h, W, H):
     return np.array([[fx * W / w, 0, cx * W / w], [0, fy * H / h, cy * H / h], [0, 0, 1.0]])
 
 
+SQ = 518                                         # square network size when photos of different shapes are mixed
+
+
+def pad_square(rgb, K):
+    """Centre the photo on a white square (VGGT's own 'pad' mode uses white) and shift the principal point.
+    Returns the square image, its K (original pixels), the (x, y) offset and the valid-content mask at SQ x SQ."""
+    h, w = rgb.shape[:2]
+    S = max(h, w)
+    ox, oy = (S - w) // 2, (S - h) // 2
+    out = np.full((S, S, 3), 255, np.uint8)
+    out[oy:oy + h, ox:ox + w] = rgb
+    K2 = np.array(K, float).copy()
+    K2[0, 2] += ox
+    K2[1, 2] += oy
+    m = np.zeros((SQ, SQ), bool)
+    s = SQ / S
+    m[int(np.ceil(oy * s)):int((oy + h) * s), int(np.ceil(ox * s)):int((ox + w) * s)] = True
+    return out, K2, (ox, oy), m
+
+
 class Brain:
     def __init__(self):
         from l2cs import Pipeline
@@ -97,6 +117,9 @@ class Brain:
         grey = np.full((h, w, 3), 127, np.uint8)
         self._vggt([grey] * (n_room + 1), W, H)          # plan: room photos + person photo
         self._vggt([grey] * (n_room + 2), W, H)          # target: + the photo after turning
+        sq = np.full((SQ, SQ, 3), 127, np.uint8)         # plan_map/target with a saved map: room + anchor + person (+ target)
+        self._vggt([sq] * (n_room + 2), SQ, SQ)
+        self._vggt([sq] * (n_room + 3), SQ, SQ)
         self.faces(grey)
         with torch.inference_mode():
             self.l2cs.model(torch.zeros(1, 3, 224, 224, device=DEV))
@@ -214,29 +237,134 @@ class Brain:
         self.state = dict(rgbs=rgbs, K_room=K_room, K_person=K_person, gaze=g, nR=nR, plan=res)
         return res
 
+    # ------------------------------------------------------------------ step A': where to turn, using a saved room map
+    def plan_map(self, room, K_room, person, K_person, hfov, vfov, pan0=0.0, tilt0=0.0, pan_limits=None,
+                 tilt_limits=(-40.0, 40.0), anchor=None, K_anchor=None, arm=None):
+        """The room map comes from photos taken BEFORE (e.g. the iPhone Turn Capture circle); the robot only took the
+        person photo. VGGT puts that photo in the same map, which gives the eyes AND the robot camera's position and
+        direction. The search runs from the robot camera's position, relative to the direction it faces now:
+            robot pan  = pan0 + search pan            (pan0, tilt0 = robot pose when the person photo was taken)
+            robot tilt = tilt0 + (search tilt - elevation of the person photo)
+        Photos of different shapes (iPhone portrait, RealSense landscape) are padded to SQ x SQ squares.
+
+        anchor (optional): an earlier photo taken FROM THE ROBOT'S SPOT (e.g. the iPhone person photo). It is added
+        to the VGGT run as extra room structure, and its camera centre is used as the robot camera position
+        (the robot's own photo still gives the current face, gaze and heading).
+
+        arm (optional): {"radius_m": camera distance from the J1 axis (robot/piper_fk.py),
+                         "m_per_unit": metres per VGGT unit}. With both, the camera centre swings around the base
+        axis when the base turns (FastSearch center_fn); without a metric scale it is assumed to turn in place."""
+        t0 = time.time()
+        rooms = [pad_square(load_rgb(p), K_room) for p in room]
+        extra = [pad_square(load_rgb(anchor), K_anchor)] if anchor is not None else []
+        pers = pad_square(load_rgb(person), K_person)
+        allp = rooms + extra + [pers]
+        rgbs = [r[0] for r in allp]
+        masks = [r[3] for r in allp]
+        Ks = [K_net(k[0, 0], k[1, 1], k[0, 2], k[1, 2], im.shape[1], im.shape[0], SQ, SQ)
+              for im, k in zip(rgbs, [r[1] for r in allp])]
+        nR = len(room)                      # room photos: indices 0..nR-1 (their points make the map)
+        iA = nR if extra else None          # anchor photo
+        iP = len(allp) - 1                  # the robot's person photo (last)
+        v = self._vggt(rgbs, SQ, SQ)
+        extr, wp, wconf, depth = v["extr"], v["wp"], v["wconf"], v["depth"]
+        t_vggt = time.time() - t0
+
+        fwd = np.stack([e[2, :3] for e in extr])
+        _, _, vt = np.linalg.svd(fwd[:nR])                       # the room circle was taken level -> its normal is "up"
+        up = vt[2] if vt[2] @ (-extr[0][1, :3]) > 0 else -vt[2]
+        centers = np.stack([-e[:3, :3].T @ e[:3, 3] for e in extr])
+        # search FROM the robot camera (anchor spot if given, else VGGT's estimate), relative to the robot's view
+        cam = centers[iA] if iA is not None else centers[iP]
+        ref = fwd[iP]
+
+        P, area = [], []
+        s = STRIDE
+        for k in range(nR):
+            pts = wp[k, ::s, ::s].reshape(-1, 3)
+            c = wconf[k, ::s, ::s].reshape(-1)
+            valid = masks[k][::s, ::s].reshape(-1)                # drop the white padding
+            ok = valid & np.isfinite(pts).all(1)
+            keep = ok & (c >= np.quantile(c[ok], 1 - CONF_KEEP))
+            a = A.point_areas_from_depth(depth[k, ::s, ::s].reshape(-1), Ks[k][0, 0] / s, Ks[k][1, 1] / s)
+            P.append(pts[keep]); area.append(a[keep])
+        P, area = np.concatenate(P).astype(np.float32), np.concatenate(area).astype(np.float32)
+
+        rgb_p = load_rgb(person)
+        g = self.gaze(rgb_p[:, :, ::-1].copy())                   # L2CS on the real (unpadded) photo
+        ox, oy = pers[2]
+        g["bbox"] = g["bbox"] + np.array([ox, oy, ox, oy], np.float32)   # face box in padded-square pixels
+        eye, gaze = self._eye_gaze(g, v, iP, rgbs[iP], Ks[iP], SQ, SQ)
+        w = A.gaze_weights(P, eye, gaze, g["half"], z_edge=1.96, up=up, device=DEV)
+        reach = A.reachable_from(P, cam, up, device=DEV)
+        reach_mass = float((w * area * reach).sum() / max((w * area).sum(), 1e-12))
+
+        elev_p = float(np.degrees(np.arcsin(np.clip(fwd[iP] @ up, -1, 1))))
+        pl = pan_limits or (-180.0, 180.0)
+        pan_range = (pl[0] - pan0, pl[1] - pan0)
+        tilt_range = (max(TILTS[0], tilt_limits[0] - tilt0 + elev_p), min(TILTS[1], tilt_limits[1] - tilt0 + elev_p))
+        center_fn = None
+        arm = arm or {}
+        if arm.get("radius_m") and arm.get("m_per_unit"):
+            r_u = float(arm["radius_m"]) / float(arm["m_per_unit"])            # radius in VGGT units
+            h0 = ref - (ref @ up) * up; h0 /= np.linalg.norm(h0)
+            right = np.cross(h0, up)
+            axis = cam - r_u * h0                                              # camera faces outward from the J1 axis
+
+            def center_fn(p, t, axis=axis, h0=h0, right=right, r_u=r_u):
+                q = np.deg2rad(p)
+                return axis + r_u * (np.cos(q) * h0 + np.sin(q) * right)
+        FS = A.FastSearch(P, w, cam, ref, up, area=area, device=DEV)
+        b = FS.best(hfov, vfov, pan_range=pan_range, tilt_range=tilt_range, coarse=COARSE, fine=FINE, center_fn=center_fn)
+        # how much of the footprint the robot sees WITHOUT turning (the current view)
+        R_now = A.rotation_looking_at(A.forward_from_pan_tilt(0.0, elev_p, ref, up), up)
+        now = float(FS.mass(R_now[None], hfov, vfov)[0])
+        res = dict(yaw=g["yaw"], pitch=g["pitch"], cone_half=g["half"], reachable=reach_mass,
+                   turn_pan=float(b["pan"]), turn_tilt=float(b["tilt"]) - elev_p,
+                   robot_pan=pan0 + float(b["pan"]), robot_tilt=tilt0 + float(b["tilt"]) - elev_p,
+                   captured=float(b["mass"]), focus=float(b["focus"]), captured_without_turning=now,
+                   person_photo_elevation=elev_p, robot_cam_to_map_centre=float(np.linalg.norm(cam - centers[:nR].mean(0))),
+                   map_size=float(np.percentile(np.linalg.norm(P - centers[:nR].mean(0), axis=1), 90)),
+                   # check of the "robot stands where the anchor photo was taken" assumption (VGGT units)
+                   robot_cam_vggt_to_anchor=None if iA is None else float(np.linalg.norm(centers[iP] - centers[iA])),
+                   eye_to_robot_cam=float(np.linalg.norm(eye - cam)),
+                   used_anchor=iA is not None, arm=arm, used_center_fn=center_fn is not None,
+                   secs_vggt=round(t_vggt, 2), secs_total=round(time.time() - t0, 2), net_size=(SQ, SQ))
+        self.state = dict(mode="map", rgbs=rgbs, Ks=Ks, gaze=g, nR=nR, iP=iP, plan=res)
+        return res
+
     # ------------------------------------------------------------------ step B: where is the person looking
     def target(self, photo, K_target, out_dir=None):
         """photo taken after turning -> fused heat map (gaze cone x DeepGaze IIE), peak pixel, overlay image."""
         st = self.state
         t0 = time.time()
         rgbT = load_rgb(photo)
-        rgbs = st["rgbs"] + [rgbT]
-        h0, w0 = rgbs[0].shape[:2]
-        W, H = net_size(w0, h0)
-        iP, iT = st["nR"], st["nR"] + 1
-        hp, wpx = rgbs[iP].shape[:2]
-        Kp = K_net(st["K_person"][0, 0], st["K_person"][1, 1], st["K_person"][0, 2], st["K_person"][1, 2], wpx, hp, W, H)
-        v = self._vggt(rgbs, W, H)            # new run: the target photo gets a 3D point per pixel, same frame as the person
-        eye, gaze = self._eye_gaze(st["gaze"], v, iP, rgbs[iP], Kp, W, H)
-
         bgrT = rgbT[:, :, ::-1].copy()
         H0, W0 = bgrT.shape[:2]
-        dir_cam = F.gaze_dir_cam_from_dir_world(gaze, v["extr"][iT])
-        theta_net = F.theta_map_from_eye_and_worldpoints(v["wp"][iT], v["extr"][iT], eye, dir_cam)
+        iP, iT = st["nR"], st["nR"] + 1
+        if st.get("mode") == "map":           # saved room map (+ anchor) + robot photos, all padded to squares
+            iP, iT = st["iP"], len(st["rgbs"])
+            sqT, _KT, (ox, oy), _m = pad_square(rgbT, K_target)
+            v = self._vggt(st["rgbs"] + [sqT], SQ, SQ)
+            eye, gaze = self._eye_gaze(st["gaze"], v, iP, st["rgbs"][iP], st["Ks"][iP], SQ, SQ)
+            dir_cam = F.gaze_dir_cam_from_dir_world(gaze, v["extr"][iT])
+            theta_net = F.theta_map_from_eye_and_worldpoints(v["wp"][iT], v["extr"][iT], eye, dir_cam)
+            S0 = sqT.shape[0]
+            theta_full = cv2.resize(theta_net, (S0, S0), interpolation=cv2.INTER_LINEAR)[oy:oy + H0, ox:ox + W0]
+        else:
+            rgbs = st["rgbs"] + [rgbT]
+            h0, w0 = rgbs[0].shape[:2]
+            W, H = net_size(w0, h0)
+            hp, wpx = rgbs[iP].shape[:2]
+            Kp = K_net(st["K_person"][0, 0], st["K_person"][1, 1], st["K_person"][0, 2], st["K_person"][1, 2], wpx, hp, W, H)
+            v = self._vggt(rgbs, W, H)        # new run: the target photo gets a 3D point per pixel, same frame as the person
+            eye, gaze = self._eye_gaze(st["gaze"], v, iP, rgbs[iP], Kp, W, H)
+            dir_cam = F.gaze_dir_cam_from_dir_world(gaze, v["extr"][iT])
+            theta_net = F.theta_map_from_eye_and_worldpoints(v["wp"][iT], v["extr"][iT], eye, dir_cam)
+            theta_full = cv2.resize(theta_net, (W0, H0), interpolation=cv2.INTER_LINEAR)
         half = st["gaze"]["half"]
         sigma = F.sigma_from_cone_quantile(np.deg2rad(half), F.CONE_QUANTILE)
         # DeepGaze on the cone-conditioned photo (as final_form.py: outside the cone darkened)
-        theta_full = cv2.resize(theta_net, (W0, H0), interpolation=cv2.INTER_LINEAR)
         mask_u8 = ((theta_full <= np.deg2rad(half)) * 255).astype(np.uint8)
         img = F.blend_image_with_mask(bgrT, mask_u8, outside_dark=F.MASK_OUTSIDE_DARK)
         if max(H0, W0) > F.DEEPGAZE_MAX_DIM:
@@ -249,7 +377,7 @@ class Brain:
             ld = self.dg(torch.from_numpy(img.transpose(2, 0, 1).copy()).unsqueeze(0).to(DEV).half(),
                          torch.from_numpy(cb).unsqueeze(0).to(DEV).half())[0, 0].float().cpu().numpy()
         S = F.normalize_prob_map(np.exp(ld - ld.max()))
-        theta = cv2.resize(theta_net, (Wd, Hd), interpolation=cv2.INTER_LINEAR)
+        theta = cv2.resize(theta_full, (Wd, Hd), interpolation=cv2.INTER_LINEAR)
         G = F.normalize_prob_map(F.geometry_likelihood(theta, sigma))
         Hf = F.fuse_poe(G, S, F.ALPHA, F.BETA)
         _Hobj, (py, px), _region = F.extract_single_object_heatmap(Hf, F.SINGLEOBJ_REL_THRESH, F.SINGLEOBJ_SMOOTH_SIGMA,
