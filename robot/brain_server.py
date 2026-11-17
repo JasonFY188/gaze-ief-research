@@ -21,7 +21,10 @@ import os
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+# NOT ThreadingHTTPServer: cuDNN's autotuning cache is per thread (cudnn.benchmark is on), so a new thread per
+# request re-tuned every model on every call (measured: RetinaFace 16 s per call in a new thread, 0.02 s on the
+# same thread). One thread = the warm-up below is reused by every request.
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import cv2
 import numpy as np
@@ -135,7 +138,9 @@ def main():
     if args.warmup != "none":
         ww, hh = map(int, args.warmup.lower().split("x"))
         Handler.brain.warmup(ww, hh)
-    srv = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
+        s = min(1.0, 640 / max(ww, hh))           # brain_client.faces() sends frames shrunk to 640 px
+        Handler.brain.faces(np.full((int(round(hh * s)), int(round(ww * s)), 3), 127, np.uint8))
+    srv = HTTPServer(("0.0.0.0", args.port), Handler)   # single thread, same as the warm-up (see import note)
     print(f"brain server ready on port {args.port}. Give the laptop this PC's IPv4 address (ipconfig).", flush=True)
     try:
         srv.serve_forever()
