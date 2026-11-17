@@ -49,3 +49,7 @@ turn_capture/certs/
 *.srl
 # 3D exports of results
 *.ply
+
+# robot integration: per-machine files
+robot/arm_home.json
+robot/realsense_intrinsics.json
