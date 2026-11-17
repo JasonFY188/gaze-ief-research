@@ -95,7 +95,7 @@ class Handler(BaseHTTPRequestHandler):
                                      req["hfov"], req["vfov"], pan0=req.get("pan0", 0.0), tilt0=req.get("tilt0", 0.0),
                                      pan_limits=req.get("pan_limits"), anchor=anchor,
                                      K_anchor=None if anchor is None else np.array(req["K_anchor"]),
-                                     arm=req.get("arm"))
+                                     arm=req.get("arm"), viz=bool(req.get("viz")))
                 elif self.path == "/target":
                     res, over = b.target(dec(req["image"]), np.array(req["K"]))
                     out = {"result": res, "overlay": enc(over)}

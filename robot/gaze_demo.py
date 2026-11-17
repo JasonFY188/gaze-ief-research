@@ -209,11 +209,15 @@ def run(args):
             arm_info = {"radius_m": fk["radius"], "height_m": fk["height"], "cam_elevation_deg": fk["elevation_deg"]}
             if isinstance(brain, __import__("robot.brain_client", fromlist=["RemoteBrain"]).RemoteBrain):
                 plan = brain.plan_map(map_dir, K_map, person, K, cam.hfov, cam.vfov, pan0=pan0, tilt0=tilt0,
-                                      pan_limits=PAN_LIMITS, anchor=anchor, K_anchor=K_anchor, arm=arm_info)
+                                      pan_limits=PAN_LIMITS, anchor=anchor, K_anchor=K_anchor, arm=arm_info, viz=True)
             else:
                 plan = brain.plan_map(map_photos, K_map, person, K, cam.hfov, cam.vfov, pan0=pan0, tilt0=tilt0,
                                       pan_limits=PAN_LIMITS, anchor=os.path.join(HERE, anchor) if anchor else None,
-                                      K_anchor=K_anchor, arm=arm_info)
+                                      K_anchor=K_anchor, arm=arm_info, viz=True)
+            viz = plan.pop("viz", None)                  # 3D room + footprint + search grid, for robot/report.py
+            if viz:
+                np.savez_compressed(os.path.join(out, "viz.npz"),
+                                    **{k: np.asarray(v) for k, v in viz.items() if v is not None})
             plan.update(person_robot_pan=pan0, person_robot_tilt=tilt0, map=map_dir, anchor=anchor)
             print(f"[run] gaze yaw {plan['yaw']:+.0f} pitch {plan['pitch']:+.0f} cone ±{plan['cone_half']:.0f}  ->  turn by "
                   f"pan {plan['turn_pan']:+.0f} tilt {plan['turn_tilt']:+.0f} = robot pan {plan['robot_pan']:+.0f} tilt "
@@ -242,7 +246,16 @@ def run(args):
         json.dump(plan, open(os.path.join(out, "result.json"), "w"), indent=1, default=float)
         print(f"[run] predicted gaze target at pixel {tgt['peak_px']} -> {out}")
         cv2.imshow("robot", overlay(over, ["predicted gaze target (green cross)", "any key = again, ESC = quit"]))
-        if cv2.waitKey(0) == 27:
+        k = cv2.waitKey(0)
+        # record for the presentation: figures, 3D view, runs.csv (never stops the demo if drawing fails)
+        if os.path.exists(os.path.join(out, "viz.npz")):
+            try:
+                note = input("[run] What was the person really looking at? (Enter = skip): ").strip()
+                from robot import report
+                report.make(out, note or None)
+            except Exception as e:
+                print(f"[run] report failed ({type(e).__name__}: {e}); the run is still saved in {out}")
+        if k == 27:
             break
         arm.home()
     cam.stop(); cv2.destroyAllWindows()

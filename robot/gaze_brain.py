@@ -243,7 +243,7 @@ class Brain:
 
     # ------------------------------------------------------------------ step A': where to turn, using a saved room map
     def plan_map(self, room, K_room, person, K_person, hfov, vfov, pan0=0.0, tilt0=0.0, pan_limits=None,
-                 tilt_limits=(-40.0, 40.0), anchor=None, K_anchor=None, arm=None):
+                 tilt_limits=(-40.0, 40.0), anchor=None, K_anchor=None, arm=None, viz=False):
         """The room map comes from photos taken BEFORE (e.g. the iPhone Turn Capture circle); the robot only took the
         person photo. VGGT puts that photo in the same map, which gives the eyes AND the robot camera's position and
         direction. The search runs from the robot camera's position, relative to the direction it faces now:
@@ -284,7 +284,7 @@ class Brain:
         cam = centers[iP]
         ref = fwd[iP]
 
-        P, area = [], []
+        P, area, rgb = [], [], []
         s = STRIDE
         for k in range(nR):
             pts = wp[k, ::s, ::s].reshape(-1, 3)
@@ -293,8 +293,10 @@ class Brain:
             ok = valid & np.isfinite(pts).all(1)
             keep = ok & (c >= np.quantile(c[ok], 1 - CONF_KEEP))
             a = A.point_areas_from_depth(depth[k, ::s, ::s].reshape(-1), Ks[k][0, 0] / s, Ks[k][1, 1] / s)
-            P.append(pts[keep]); area.append(a[keep])
+            col = v["ims"][k].permute(1, 2, 0).numpy()[::s, ::s].reshape(-1, 3)
+            P.append(pts[keep]); area.append(a[keep]); rgb.append(col[keep])
         P, area = np.concatenate(P).astype(np.float32), np.concatenate(area).astype(np.float32)
+        rgb = (np.concatenate(rgb) * 255).astype(np.uint8)
 
         rgb_p = load_rgb(person)
         g = self.gaze(rgb_p[:, :, ::-1].copy())                   # L2CS on the real (unpadded) photo
@@ -322,6 +324,10 @@ class Brain:
                 return axis + r_u * (np.cos(q) * h0 + np.sin(q) * right)
         FS = A.FastSearch(P, w, cam, ref, up, area=area, device=DEV)
         b = FS.best(hfov, vfov, pan_range=pan_range, tilt_range=tilt_range, coarse=COARSE, fine=FINE, center_fn=center_fn)
+        if not (pan_range[0] <= b["pan"] <= pan_range[1]):       # the 1-deg refinement can step past the arm's range
+            b["pan"] = float(np.clip(b["pan"], *pan_range))
+            b["R"] = A.rotation_looking_at(A.forward_from_pan_tilt(b["pan"], b["tilt"], ref, up), up)
+            b["mass"] = float(FS.mass(b["R"][None], hfov, vfov)[0])
         # how much of the footprint the robot sees WITHOUT turning (the current view)
         R_now = A.rotation_looking_at(A.forward_from_pan_tilt(0.0, elev_p, ref, up), up)
         now = float(FS.mass(R_now[None], hfov, vfov)[0])
@@ -337,6 +343,16 @@ class Brain:
                    used_anchor=iA is not None, arm=arm, used_center_fn=center_fn is not None,
                    secs_vggt=round(t_vggt, 2), secs_total=round(time.time() - t0, 2), net_size=(SQ, SQ))
         self.state = dict(mode="map", rgbs=rgbs, Ks=Ks, gaze=g, nR=nR, iP=iP, plan=res)
+        if viz:                       # everything robot/report.py needs to draw the presentation figures
+            rng = np.random.default_rng(0)
+            sub = rng.choice(len(P), min(40000, len(P)), replace=False)
+            pans, tilts, G = b["coarse_grid"]
+            res["viz"] = dict(P=P[sub].round(4), w=w[sub].round(4), rgb=rgb[sub],
+                              cam=cam, eye=eye, gaze=gaze, up=up, ref=ref, hfov=hfov, vfov=vfov, elev_now=elev_p,
+                              room_centers=centers[:nR], room_fwd=fwd[:nR],
+                              anchor_center=None if iA is None else centers[iA],
+                              grid_pans=pans, grid_tilts=tilts, grid=G.round(4),
+                              bbox=g["bbox"] - np.array([ox, oy, ox, oy], np.float32))   # face box in the real photo
         return res
 
     # ------------------------------------------------------------------ step B: where is the person looking

@@ -56,13 +56,18 @@ class RemoteBrain:
             "pan_limits": None if pan_limits is None else list(pan_limits)})
 
     def plan_map(self, room_dir, K_room, person, K_person, hfov, vfov, pan0=0.0, tilt0=0.0, pan_limits=None,
-                 anchor=None, K_anchor=None, arm=None):
-        """room_dir / anchor: paths RELATIVE TO THE REPO; the brain PC reads them from its own copy of data/."""
-        return self._post("/plan_map", {
+                 anchor=None, K_anchor=None, arm=None, viz=False):
+        """room_dir / anchor: paths RELATIVE TO THE REPO; the brain PC reads them from its own copy of data/.
+        viz=True also returns the 3D points, footprint and search grid (for robot/report.py)."""
+        out = self._post("/plan_map", {
+            "viz": viz,
             "room_dir": room_dir.replace("\\", "/"), "anchor": anchor.replace("\\", "/") if anchor else None,
             "K_room": np.asarray(K_room).tolist(), "K_anchor": None if K_anchor is None else np.asarray(K_anchor).tolist(),
             "person": enc(imread(person)), "K_person": np.asarray(K_person).tolist(), "hfov": hfov, "vfov": vfov,
             "pan0": pan0, "tilt0": tilt0, "pan_limits": None if pan_limits is None else list(pan_limits), "arm": arm})
+        if out.get("viz"):
+            out["viz"] = {k: (np.asarray(v) if isinstance(v, list) else v) for k, v in out["viz"].items()}
+        return out
 
     def target(self, photo, K, out_dir=None):
         out = self._post("/target", {"image": enc(imread(photo)), "K": np.asarray(K).tolist()})
