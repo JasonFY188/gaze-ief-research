@@ -56,11 +56,11 @@ class RemoteBrain:
             "pan_limits": None if pan_limits is None else list(pan_limits)})
 
     def plan_map(self, room_dir, K_room, person, K_person, hfov, vfov, pan0=0.0, tilt0=0.0, pan_limits=None,
-                 anchor=None, K_anchor=None, arm=None, viz=False):
+                 anchor=None, K_anchor=None, arm=None, viz=False, method="footprint"):
         """room_dir / anchor: paths RELATIVE TO THE REPO; the brain PC reads them from its own copy of data/.
         viz=True also returns the 3D points, footprint and search grid (for robot/report.py)."""
         out = self._post("/plan_map", {
-            "viz": viz,
+            "viz": viz, "method": method,
             "room_dir": room_dir.replace("\\", "/"), "anchor": anchor.replace("\\", "/") if anchor else None,
             "K_room": np.asarray(K_room).tolist(), "K_anchor": None if K_anchor is None else np.asarray(K_anchor).tolist(),
             "person": enc(imread(person)), "K_person": np.asarray(K_person).tolist(), "hfov": hfov, "vfov": vfov,

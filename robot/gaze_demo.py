@@ -144,11 +144,11 @@ def find_and_face(arm, cam, brain, pan=0.0, tilt=0.0):
     raise RuntimeError("could not centre on a face")
 
 
-def countdown_photo(cam, delay):
+def countdown_photo(cam, delay, title="facing you.  Press SPACE, then look at something"):
     """Live view; SPACE starts a countdown; the photo is taken at 0. ESC aborts."""
     while True:
         img = cam.read()
-        cv2.imshow("robot", overlay(img.copy(), ["facing you.  Press SPACE, then look at something",
+        cv2.imshow("robot", overlay(img.copy(), [title,
                                                  f"(photo after {delay:g} s)   ESC = quit"]))
         k = cv2.waitKey(1)
         if k == 27:

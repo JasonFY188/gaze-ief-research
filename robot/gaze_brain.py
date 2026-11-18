@@ -75,6 +75,36 @@ def K_net(fx, fy, cx, cy, w, h, W, H):
 
 SQ = 518                                         # square network size when photos of different shapes are mixed
 
+# The three ways of aiming the camera compared in the experiment (robot/experiment.py)
+METHODS = ("footprint", "parallel", "raycast")
+METHOD_LABELS = {"footprint": "1 footprint x FOV search", "parallel": "2 camera parallel to gaze",
+                 "raycast": "3 aim at gaze-ray hit point"}
+
+
+def gaze_ray_hit(P, eye, gaze, t_min, angles=(1, 2, 3, 5, 8, 12), min_points=15):
+    """Where the gaze ray first meets the 3D map. The map is a sparse point cloud, so a thin ray rarely touches a point:
+    take the points within a small angle of the ray (the smallest angle that has enough points) and use the near end
+    of them (10th percentile of the distance along the ray). Returns (3D point on the ray, angle used), or (None, None)."""
+    V = P - eye
+    t = V @ gaze
+    perp = np.linalg.norm(V - t[:, None] * gaze[None], axis=1)
+    ang = np.degrees(np.arctan2(perp, np.maximum(t, 1e-9)))
+    for lim in angles:
+        near = (t > t_min) & (ang <= lim)
+        if near.sum() >= min_points:
+            return eye + float(np.percentile(t[near], 10)) * gaze, float(lim)
+    return None, None
+
+
+def pan_into_range(pan, lo, hi):
+    """The same direction inside the arm's pan range (pan or pan +- 360); if unreachable, the nearest limit.
+    Returns (pan, limited_by_the_arm)."""
+    for p in (pan, pan - 360.0, pan + 360.0):
+        if lo <= p <= hi:
+            return float(p), False
+    off = lambda limit: abs((pan - limit + 180.0) % 360.0 - 180.0)                # noqa: E731
+    return float(lo if off(lo) <= off(hi) else hi), True
+
 
 def pad_square(rgb, K):
     """Centre the photo on a white square (VGGT's own 'pad' mode uses white) and shift the principal point.
@@ -243,7 +273,7 @@ class Brain:
 
     # ------------------------------------------------------------------ step A': where to turn, using a saved room map
     def plan_map(self, room, K_room, person, K_person, hfov, vfov, pan0=0.0, tilt0=0.0, pan_limits=None,
-                 tilt_limits=(-40.0, 40.0), anchor=None, K_anchor=None, arm=None, viz=False):
+                 tilt_limits=(-40.0, 40.0), anchor=None, K_anchor=None, arm=None, viz=False, method="footprint"):
         """The room map comes from photos taken BEFORE (e.g. the iPhone Turn Capture circle); the robot only took the
         person photo. VGGT puts that photo in the same map, which gives the eyes AND the robot camera's position and
         direction. The search runs from the robot camera's position, relative to the direction it faces now:
@@ -324,19 +354,39 @@ class Brain:
                 return axis + r_u * (np.cos(q) * h0 + np.sin(q) * right)
         FS = A.FastSearch(P, w, cam, ref, up, area=area, device=DEV)
         b = FS.best(hfov, vfov, pan_range=pan_range, tilt_range=tilt_range, coarse=COARSE, fine=FINE, center_fn=center_fn)
-        if not (pan_range[0] <= b["pan"] <= pan_range[1]):       # the 1-deg refinement can step past the arm's range
-            b["pan"] = float(np.clip(b["pan"], *pan_range))
-            b["R"] = A.rotation_looking_at(A.forward_from_pan_tilt(b["pan"], b["tilt"], ref, up), up)
-            b["mass"] = float(FS.mass(b["R"][None], hfov, vfov)[0])
         # how much of the footprint the robot sees WITHOUT turning (the current view)
         R_now = A.rotation_looking_at(A.forward_from_pan_tilt(0.0, elev_p, ref, up), up)
         now = float(FS.mass(R_now[None], hfov, vfov)[0])
-        res = dict(yaw=g["yaw"], pitch=g["pitch"], cone_half=g["half"], reachable=reach_mass,
-                   turn_pan=float(b["pan"]), turn_tilt=float(b["tilt"]) - elev_p,
-                   robot_pan=pan0 + float(b["pan"]), robot_tilt=tilt0 + float(b["tilt"]) - elev_p,
-                   captured=float(b["mass"]), focus=float(b["focus"]), captured_without_turning=now,
+        map_size = float(np.percentile(np.linalg.norm(P - centers[:nR].mean(0), axis=1), 90))
+
+        def aim(pan_w, tilt_w):
+            """One camera direction (pan from the current view, absolute elevation), limited to what the arm can reach."""
+            pan, pan_lim = pan_into_range(pan_w, *pan_range)
+            tilt = float(np.clip(tilt_w, *tilt_range))
+            R = A.rotation_looking_at(A.forward_from_pan_tilt(pan, tilt, ref, up), up)
+            return dict(turn_pan=pan, turn_tilt=tilt - elev_p, robot_pan=pan0 + pan, robot_tilt=tilt0 + tilt - elev_p,
+                        wanted_pan=float(pan_w), wanted_elevation=float(tilt_w), elevation=tilt,
+                        limited_by_arm=bool(pan_lim or abs(tilt - tilt_w) > 1e-6),
+                        captured=float(FS.mass(R[None], hfov, vfov)[0]), focus=float(FS.focus(R, hfov, vfov)))
+
+        # Method 3 aims at the point where the gaze ray meets the 3D map (seen from the robot camera)
+        hit, hit_angle = gaze_ray_hit(P, eye, gaze, t_min=0.1 * map_size)
+        hit_found = hit is not None
+        if not hit_found:                                        # the ray leaves the map: aim at a far point on it
+            hit = eye + map_size * gaze
+        views = dict(footprint=aim(float(b["pan"]), float(b["tilt"])),
+                     parallel=aim(*A.pan_tilt_of(gaze, ref, up)),
+                     raycast=aim(*A.pan_tilt_of(hit - cam, ref, up)))
+        if method not in views:
+            raise ValueError(f"unknown method {method!r}; use one of {METHODS}")
+        ch = views[method]
+        res = dict(method=method, method_label=METHOD_LABELS[method], methods=views,
+                   gaze_hit=hit, gaze_hit_found=hit_found, gaze_hit_angle=hit_angle, limited_by_arm=ch["limited_by_arm"],
+                   yaw=g["yaw"], pitch=g["pitch"], cone_half=g["half"], reachable=reach_mass,
+                   turn_pan=ch["turn_pan"], turn_tilt=ch["turn_tilt"], robot_pan=ch["robot_pan"], robot_tilt=ch["robot_tilt"],
+                   captured=ch["captured"], focus=ch["focus"], captured_without_turning=now,
                    person_photo_elevation=elev_p, robot_cam_to_map_centre=float(np.linalg.norm(cam - centers[:nR].mean(0))),
-                   map_size=float(np.percentile(np.linalg.norm(P - centers[:nR].mean(0), axis=1), 90)),
+                   map_size=map_size,
                    # check of the "robot stands where the anchor photo was taken" assumption (VGGT units)
                    robot_cam_vggt_to_anchor=None if iA is None else float(np.linalg.norm(centers[iP] - centers[iA])),
                    eye_to_robot_cam=float(np.linalg.norm(eye - cam)),

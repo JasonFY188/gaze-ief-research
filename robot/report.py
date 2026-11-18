@@ -122,7 +122,11 @@ def fig_search(r, V, ax, fig):
     fig.colorbar(im, ax=ax, label="% of the footprint inside the camera view")
     en = float(V["elev_now"])
     ax.plot(0, en, "wo", ms=11, mfc="none", mew=2.5, label=f"before (now): {r['captured_without_turning']:.0%}")
-    ax.plot(r["turn_pan"], en + r["turn_tilt"], "r*", ms=18, label=f"chosen: {r['captured']:.0%}")
+    for name, mk in (("footprint", "*"), ("parallel", "s"), ("raycast", "^")):      # where each method would aim
+        m = r.get("methods", {}).get(name)
+        if m and name != r.get("method", "footprint"):
+            ax.plot(m["turn_pan"], m["elevation"], mk, color="w", mec="k", ms=10, label=f"{name}: {m['captured']:.0%}")
+    ax.plot(r["turn_pan"], en + r["turn_tilt"], "r*", ms=18, label=f"used ({r.get('method', 'footprint')}): {r['captured']:.0%}")
     ax.set_xlabel("pan (deg, + = right of where the robot faced)"); ax.set_ylabel("camera elevation (deg, + = up)")
     ax.legend(loc="lower left", fontsize=10)
     ax.set_title(f"③ search: every direction scored ({r['secs_total']:.1f} s on the GPU PC incl. VGGT)")
@@ -162,6 +166,16 @@ def view3d(run, r, V):
                               (r["turn_pan"], en + r["turn_tilt"], "green", f"after turning: {r['captured']:.0%}")):
         R = A.rotation_looking_at(A.forward_from_pan_tilt(pan, tilt, ref, up), up)
         tr.append(lines_trace(frustum(cam, R, hf, vf, 0.8 * L), lab, c, 5))
+    if r.get("gaze_hit") is not None:
+        gh = np.asarray(r["gaze_hit"], float)
+        tr.append(go.Scatter3d(x=[gh[0]], y=[gh[1]], z=[gh[2]], mode="markers+text", text=["gaze ray hits the map"],
+                               name="gaze ray hit point", marker=dict(size=8, color="orange", symbol="diamond")))
+    for name, c in (("footprint", "teal"), ("parallel", "magenta"), ("raycast", "orange")):   # click the legend to show
+        m = r.get("methods", {}).get(name)
+        if m and name != r.get("method"):
+            R = A.rotation_looking_at(A.forward_from_pan_tilt(m["turn_pan"], m["elevation"], ref, up), up)
+            tr.append(lines_trace(frustum(cam, R, hf, vf, 0.8 * L), f"not used here: {name} ({m['captured']:.0%})", c, 3,
+                                  visible="legendonly"))
     tr.append(lines_trace([(c, c + 0.25 * L * f) for c, f in zip(V["room_centers"], V["room_fwd"])],
                           "iPhone map photos (where VGGT put them)", "purple", 3))
     if "anchor_center" in V and V["anchor_center"] is not None and np.asarray(V["anchor_center"]).size == 3:
@@ -224,7 +238,8 @@ def view3d_target(run, r):
 
 
 def append_csv(run, r, note):
-    row = dict(run=os.path.basename(run), yaw=round(r["yaw"], 1), pitch=round(r["pitch"], 1),
+    row = dict(run=os.path.relpath(os.path.abspath(run), os.path.dirname(RUNS_CSV)).replace("\\", "/"),
+               method=r.get("method", "footprint"), yaw=round(r["yaw"], 1), pitch=round(r["pitch"], 1),
                cone_half=round(r["cone_half"], 1), robot_pan_at_person=round(r["person_robot_pan"], 1),
                turn_pan=round(r["turn_pan"], 1), turn_tilt=round(r["turn_tilt"], 1),
                footprint_seen_before=round(r["captured_without_turning"], 3), footprint_seen_after=round(r["captured"], 3),
@@ -258,7 +273,7 @@ def make(run, note=None):
     fig_gaze(run, r, V, fg.add_subplot(2, 2, 1)); fig_top(r, V, fg.add_subplot(2, 2, 2))
     fig_search(r, V, fg.add_subplot(2, 2, 3), fg)
     ax = fg.add_subplot(2, 2, 4); fig_before_after(run, [fg.add_subplot(4, 2, 6), fg.add_subplot(4, 2, 8)]); ax.axis("off")
-    fg.suptitle(f"Active camera on PiPER: turn {r['turn_pan']:+.0f}° pan, {r['turn_tilt']:+.0f}° tilt  ->  footprint seen "
+    fg.suptitle(f"[{r.get('method_label', 'footprint search')}] Active camera on PiPER: turn {r['turn_pan']:+.0f}° pan, {r['turn_tilt']:+.0f}° tilt  ->  footprint seen "
                 f"{r['captured_without_turning']:.0%} before, {r['captured']:.0%} after"
                 + (f"   (person looked at: {note})" if note else ""), fontsize=16)
     fg.tight_layout(); fg.savefig(os.path.join(run, "summary.png"), dpi=90); plt.close(fg)
